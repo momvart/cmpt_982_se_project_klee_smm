@@ -6,17 +6,24 @@
 // License. See LICENSE.TXT for details.
 //
 //===----------------------------------------------------------------------===//
+
 #include "klee/Config/config.h"
-#include "klee/Internal/Support/ErrorHandling.h"
-#include "klee/Internal/Support/FileHandling.h"
+#include "klee/Support/ErrorHandling.h"
+#include "klee/Support/FileHandling.h"
+#include "klee/Support/OptionCategories.h"
+
+#include <csignal>
+
 #ifdef ENABLE_Z3
+
 #include "Z3Solver.h"
 #include "Z3Builder.h"
-#include "klee/Constraints.h"
-#include "klee/Solver.h"
-#include "klee/SolverImpl.h"
-#include "klee/util/Assignment.h"
-#include "klee/util/ExprUtil.h"
+
+#include "klee/Expr/Constraints.h"
+#include "klee/Expr/Assignment.h"
+#include "klee/Expr/ExprUtil.h"
+#include "klee/Solver/Solver.h"
+#include "klee/Solver/SolverImpl.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -25,19 +32,23 @@ namespace {
 // the z3 binary to replay all Z3 API calls using its `-log` option.
 llvm::cl::opt<std::string> Z3LogInteractionFile(
     "debug-z3-log-api-interaction", llvm::cl::init(""),
-    llvm::cl::desc("Log API interaction with Z3 to the specified path"));
+    llvm::cl::desc("Log API interaction with Z3 to the specified path"),
+    llvm::cl::cat(klee::SolvingCat));
 
 llvm::cl::opt<std::string> Z3QueryDumpFile(
     "debug-z3-dump-queries", llvm::cl::init(""),
-    llvm::cl::desc("Dump Z3's representation of the query to the specified path"));
+    llvm::cl::desc("Dump Z3's representation of the query to the specified path"),
+    llvm::cl::cat(klee::SolvingCat));
 
 llvm::cl::opt<bool> Z3ValidateModels(
     "debug-z3-validate-models", llvm::cl::init(false),
-    llvm::cl::desc("When generating Z3 models validate these against the query"));
+    llvm::cl::desc("When generating Z3 models validate these against the query"),
+    llvm::cl::cat(klee::SolvingCat));
 
 llvm::cl::opt<unsigned>
     Z3VerbosityLevel("debug-z3-verbosity", llvm::cl::init(0),
-                     llvm::cl::desc("Z3 verbosity level (default=0)"));
+                     llvm::cl::desc("Z3 verbosity level (default=0)"),
+                     llvm::cl::cat(klee::SolvingCat));
 }
 
 #include "llvm/Support/ErrorHandling.h"
@@ -163,10 +174,10 @@ char *Z3SolverImpl::getConstraintLog(const Query &query) {
   constant_arrays_in_query.visit(query.expr);
 
   for (auto const &constant_array : constant_arrays_in_query.results) {
-    assert(builder->constant_array_assertions.count(constant_array) == 1 &&
+    assert(temp_builder.constant_array_assertions.count(constant_array) == 1 &&
            "Constant array found in query, but not handled by Z3Builder");
     for (auto const &arrayIndexValueExpr :
-         builder->constant_array_assertions[constant_array]) {
+         temp_builder.constant_array_assertions[constant_array]) {
       assumptions.push_back(arrayIndexValueExpr);
     }
   }
@@ -257,7 +268,7 @@ bool Z3SolverImpl::internalRunSolver(
     Z3_solver_assert(builder->ctx, theSolver, builder->construct(constraint));
     constant_arrays_in_query.visit(constraint);
   }
-  ++stats::queries;
+  ++stats::solverQueries;
   if (objects)
     ++stats::queryCounterexamples;
 
@@ -314,6 +325,9 @@ bool Z3SolverImpl::internalRunSolver(
     }
     return true; // success
   }
+  if (runStatusCode == SolverImpl::SOLVER_RUN_STATUS_INTERRUPTED) {
+    raise(SIGINT);
+  }
   return false; // failed
 }
 
@@ -349,7 +363,7 @@ SolverImpl::SolverRunStatus Z3SolverImpl::handleSolverResponse(
         __attribute__((unused))
         bool successfulEval =
             Z3_model_eval(builder->ctx, theModel, initial_read,
-                          /*model_completion=*/Z3_TRUE, &arrayElementExpr);
+                          /*model_completion=*/true, &arrayElementExpr);
         assert(successfulEval && "Failed to evaluate model");
         Z3_inc_ref(builder->ctx, arrayElementExpr);
         assert(Z3_get_ast_kind(builder->ctx, arrayElementExpr) ==
@@ -392,6 +406,9 @@ SolverImpl::SolverRunStatus Z3SolverImpl::handleSolverResponse(
     if (strcmp(reason, "unknown") == 0) {
       return SolverImpl::SOLVER_RUN_STATUS_FAILURE;
     }
+    if (strcmp(reason, "interrupted from keyboard") == 0) {
+      return SolverImpl::SOLVER_RUN_STATUS_INTERRUPTED;
+    }
     klee_warning("Unexpected solver failure. Reason is \"%s,\"\n", reason);
     abort();
   }
@@ -416,7 +433,7 @@ bool Z3SolverImpl::validateZ3Model(::Z3_solver &theSolver, ::Z3_model &theModel)
     __attribute__((unused))
     bool successfulEval =
         Z3_model_eval(builder->ctx, theModel, constraint,
-                      /*model_completion=*/Z3_TRUE, &rawEvaluatedExpr);
+                      /*model_completion=*/true, &rawEvaluatedExpr);
     assert(successfulEval && "Failed to evaluate model");
 
     // Use handle to do ref-counting.

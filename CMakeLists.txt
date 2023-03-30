@@ -10,112 +10,35 @@
 ###############################################################################
 # Minimum CMake version and policies
 ###############################################################################
-cmake_minimum_required(VERSION 2.8.12)
-if (POLICY CMP0054)
-  # FIXME: This is horrible. With the old behaviour,
-  # quoted strings like "MSVC" in if() conditionals
-  # get implicitly dereferenced. The NEW behaviour
-  # doesn't do this but CMP0054 was only introduced
-  # in CMake 3.1 and we support lower versions as the
-  # minimum. We could set NEW here but it would be very
-  # confusing to use NEW for some builds and OLD for others
-  # which could lead to some subtle bugs. Instead when the
-  # minimum version is 3.1 change this policy to NEW and remove
-  # the hacks in place to work around it.
-  cmake_policy(SET CMP0054 OLD)
-endif()
-
-if (POLICY CMP0042)
-  # Enable `MACOSX_RPATH` by default.
-  cmake_policy(SET CMP0042 NEW)
-endif()
-
-if (POLICY CMP0037)
-  # Disallow reserved target names
-  cmake_policy(SET CMP0037 NEW)
-endif()
-
-# This overrides the default flags for the different CMAKE_BUILD_TYPEs
-set(CMAKE_USER_MAKE_RULES_OVERRIDE_C
-  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/c_flags_override.cmake")
-set(CMAKE_USER_MAKE_RULES_OVERRIDE_CXX
-  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/cxx_flags_override.cmake")
+cmake_minimum_required(VERSION 3.16.0)
 project(KLEE CXX C)
 
 include(CheckFunctionExists)
 include(CheckLibraryExists)
 
-set(SVF_ROOT_DIR CACHE PATH  /data/Random/suopa/SVF) 
+set(SVF_ROOT_DIR CACHE PATH  /todooooooooo) 
 ###############################################################################
 # Project version
 ###############################################################################
-set(KLEE_VERSION_MAJOR 1)
-set(KLEE_VERSION_MINOR 4)
-set(KLEE_VERSION_PATCH 0)
-set(KLEE_VERSION_TWEAK 0)
-set(KLEE_VERSION "${KLEE_VERSION_MAJOR}.${KLEE_VERSION_MINOR}.${KLEE_VERSION_PATCH}.${KLEE_VERSION_TWEAK}")
+set(KLEE_VERSION_MAJOR 3)
+set(KLEE_VERSION_MINOR 0-pre)
+set(KLEE_VERSION "${KLEE_VERSION_MAJOR}.${KLEE_VERSION_MINOR}")
+
+# If a patch is needed, we can add KLEE_VERSION_PATCH
+# set(KLEE_VERSION_PATCH 0)
+# set(KLEE_VERSION "${KLEE_VERSION_MAJOR}.${KLEE_VERSION_MINOR}.${KLEE_VERSION_PATCH}")
+
 message(STATUS "KLEE version ${KLEE_VERSION}")
 set(PACKAGE_STRING "\"KLEE ${KLEE_VERSION}\"")
 set(PACKAGE_URL "\"https://klee.github.io\"")
 
 ################################################################################
-# Set various useful variables depending on CMake version
-################################################################################
-if (("${CMAKE_VERSION}" VERSION_EQUAL "3.2") OR ("${CMAKE_VERSION}" VERSION_GREATER "3.2"))
-  # In CMake >= 3.2 add_custom_command() supports a ``USES_TERMINAL`` argument
-  set(ADD_CUSTOM_COMMAND_USES_TERMINAL_ARG "USES_TERMINAL")
-else()
-  set(ADD_CUSTOM_COMMAND_USES_TERMINAL_ARG "")
-endif()
-
-if (("${CMAKE_VERSION}" VERSION_EQUAL "3.4") OR ("${CMAKE_VERSION}" VERSION_GREATER "3.4"))
-  # In CMake >= 3.4 ExternalProject_Add_Step() supports a `USES_TERMINAL` argument
-  set(EXTERNAL_PROJECT_ADD_STEP_USES_TERMINAL_ARG "USES_TERMINAL" "1")
-else()
-  set(EXTERNAL_PROJECT_ADD_STEP_USES_TERMINAL_ARG "")
-endif()
-
-################################################################################
 # Sanity check - Disallow building in source.
-# Otherwise we would overwrite the Makefiles of the old build system.
 ################################################################################
 if ("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_BINARY_DIR}")
   message(FATAL_ERROR "In source builds are not allowed. You should invoke "
           "CMake from a different directory.")
 endif()
-
-################################################################################
-# Sanity Check: Check for in source build of the old build system.
-# Some build files from the old build system could interfere with our build.
-################################################################################
-set(KLEE_OLD_BUILD_SYSTEM_FILES
-  "include/klee/Config/config.h"
-  "test/lit.site.cfg"
-)
-foreach (legacy_file ${KLEE_OLD_BUILD_SYSTEM_FILES})
-  if (EXISTS "${CMAKE_SOURCE_DIR}/${legacy_file}")
-    if (EXISTS "${CMAKE_SOURCE_DIR}/.git")
-      set(CLEAN_SRC_DIR_INSTRUCTIONS
-        "The KLEE source tree apears to be a git repository so you can run"
-        " \"git clean -dxn\" to see what files aren't part of the repo and then"
-        " run \"git clean -fdx\" to remove them."
-      )
-    else()
-      # This is the only reliable way to fix this.
-      set(CLEAN_SRC_DIR_INSTRUCTIONS
-        "The KLEE source tree doesn't appear to be a git repository so you will"
-        " need to download a fresh copy of KLEE's source code."
-      )
-    endif()
-    message(FATAL_ERROR "\"${CMAKE_SOURCE_DIR}/${legacy_file}\""
-      " exists in KLEE's source tree. It is likely that the Autoconf/Makefile"
-      " build system was configured to do an in-source build in KLEE's source"
-      " tree. This could cause problems with the CMake build. "
-      ${CLEAN_SRC_DIR_INSTRUCTIONS}
-      " You can then run cmake again."
-    )
-  endif()
-endforeach()
 
 ################################################################################
 # Build type
@@ -131,7 +54,7 @@ else()
   if(NOT CMAKE_BUILD_TYPE)
     message(STATUS "CMAKE_BUILD_TYPE is not set. Setting default")
     message(STATUS "The available build types are: ${available_build_types}")
-    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE String
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING
         "Options are ${available_build_types}"
         FORCE)
     # Provide drop down menu options in cmake-gui
@@ -147,9 +70,10 @@ else()
   endif()
 endif()
 
-
 # Reference specific library paths used during linking for install
 SET(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+# use, i.e. don't skip the full RPATH for the build tree
+set(CMAKE_SKIP_BUILD_RPATH FALSE)
 
 ################################################################################
 # Add our CMake module directory to the list of module search directories
@@ -162,11 +86,6 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/modules")
 # directly modifying CMAKE_CXX_FLAGS so that other code can be easily built with
 # different flags.
 ################################################################################
-set(KLEE_COMPONENT_EXTRA_INCLUDE_DIRS "")
-set(KLEE_COMPONENT_CXX_DEFINES "")
-set(KLEE_COMPONENT_CXX_FLAGS "")
-set(KLEE_SOLVER_LIBRARIES "")
-set(KLEE_COMPONENT_EXTRA_LIBRARIES "")
 
 
 ################################################################################
@@ -175,7 +94,9 @@ set(KLEE_COMPONENT_EXTRA_LIBRARIES "")
 option(ENABLE_KLEE_ASSERTS "Enable KLEE assertions" ON)
 if (ENABLE_KLEE_ASSERTS)
   message(STATUS "KLEE assertions enabled")
-  # Assume that -DNDEBUG isn't set.
+  # We have to undefine `NDEBUG` (which CMake adds by default) using `FLAGS`
+  # and not `DEFINES` since `target_compile_definitions` does not support `-U`.
+  list(APPEND KLEE_COMPONENT_CXX_FLAGS "-UNDEBUG")
 else()
   message(STATUS "KLEE assertions disabled")
   list(APPEND KLEE_COMPONENT_CXX_DEFINES "-DNDEBUG")
@@ -195,37 +116,24 @@ include(CheckIncludeFile)
 include(CheckIncludeFileCXX)
 include(CheckPrototypeDefinition)
 include(CMakePushCheckState)
-include("${CMAKE_SOURCE_DIR}/cmake/string_to_list.cmake")
-include("${CMAKE_SOURCE_DIR}/cmake/klee_component_add_cxx_flag.cmake")
-include("${CMAKE_SOURCE_DIR}/cmake/add_global_flag.cmake")
-
+include(CheckFunctionExists)
+include(CheckLibraryExists)
 
 ################################################################################
 # Find LLVM
 ################################################################################
-include(${CMAKE_SOURCE_DIR}/cmake/find_llvm.cmake)
-set(NEEDED_LLVM_VARS
-  LLVM_PACKAGE_VERSION
-  LLVM_VERSION_MAJOR
-  LLVM_VERSION_MINOR
-  LLVM_VERSION_PATCH
-  LLVM_DEFINITIONS
-  LLVM_ENABLE_ASSERTIONS
-  LLVM_ENABLE_EH
-  LLVM_ENABLE_RTTI
-  LLVM_INCLUDE_DIRS
-  LLVM_LIBRARY_DIRS
-  LLVM_TOOLS_BINARY_DIR
-  LLVM_ENABLE_VISIBILITY_INLINES_HIDDEN
-  TARGET_TRIPLE
+find_package(LLVM REQUIRED CONFIG HINTS "${LLVM_DIR}")
+message(STATUS "LLVM directory ${LLVM_DIR}")
+set(LLVMCC "${LLVM_TOOLS_BINARY_DIR}/clang"
+  CACHE
+  PATH
+  "Path to C bitcode compiler"
+  )
+set(LLVMCXX "${LLVM_TOOLS_BINARY_DIR}/clang++"
+  CACHE
+  PATH
+  "Path to C++ bitcode compiler"
 )
-
-foreach (vname ${NEEDED_LLVM_VARS})
-  message(STATUS "${vname}: \"${${vname}}\"")
-  if (NOT (DEFINED "${vname}"))
-    message(FATAL_ERROR "${vname} was not defined")
-  endif()
-endforeach()
 
 if (LLVM_ENABLE_ASSERTIONS)
   # Certain LLVM debugging macros only work when LLVM was built with asserts
@@ -249,54 +157,49 @@ elseif ((NOT LLVM_ENABLE_ASSERTIONS) AND ENABLE_KLEE_ASSERTS)
   )
 endif()
 
-if (LLVM_ENABLE_VISIBILITY_INLINES_HIDDEN)
-  list(APPEND KLEE_COMPONENT_CXX_FLAGS "-fvisibility-inlines-hidden")
-endif()
-
-
 list(APPEND KLEE_COMPONENT_CXX_DEFINES ${LLVM_DEFINITIONS})
 list(APPEND KLEE_COMPONENT_EXTRA_INCLUDE_DIRS ${LLVM_INCLUDE_DIRS})
 
 # Find llvm-link
-set(LLVM_LINK "${LLVM_TOOLS_BINARY_DIR}/llvm-link")
+set(LLVM_LINK "${LLVM_TOOLS_BINARY_DIR}/llvm-link"
+  CACHE
+  PATH
+  "Path to bitcode linker"
+  )
 if (NOT EXISTS "${LLVM_LINK}")
   message(FATAL_ERROR "Failed to find llvm-link at \"${LLVM_LINK}\"")
 endif()
 
 # Find llvm-ar
-set(LLVM_AR "${LLVM_TOOLS_BINARY_DIR}/llvm-ar")
+set(LLVM_AR "${LLVM_TOOLS_BINARY_DIR}/llvm-ar"
+  CACHE
+  PATH
+  "Path to bitcode archive tool"
+  )
 if (NOT EXISTS "${LLVM_AR}")
   message(FATAL_ERROR "Failed to find llvm-ar at \"${LLVM_AR}\"")
 endif()
 
 # Find llvm-as
-set(LLVM_AS "${LLVM_TOOLS_BINARY_DIR}/llvm-as")
+set(LLVM_AS "${LLVM_TOOLS_BINARY_DIR}/llvm-as"
+  CACHE
+  PATH
+  "Path to bitcode assembly tool"
+  )
 if (NOT EXISTS "${LLVM_AS}")
   message(FATAL_ERROR "Failed to find llvm-as at \"${LLVM_AS}\"")
 endif()
 
-################################################################################
-# Find bitcode compiler
-################################################################################
-include("${CMAKE_SOURCE_DIR}/cmake/find_bitcode_compiler.cmake")
-message(STATUS "LLVMCC: ${LLVMCC}")
-if (NOT EXISTS "${LLVMCC}")
-  message(FATAL_ERROR "Cannot find C bitcode compiler \"${LLVMCC}\"")
-endif()
-message(STATUS "LLVMCXX: ${LLVMCXX}")
-if (NOT EXISTS "${LLVMCXX}")
-  message(FATAL_ERROR "Cannot find C++ bitcode compiler \"${LLVMCXX}\"")
+# Check for dynamic linking
+if (LLVM_LINK_LLVM_DYLIB)
+  set(USE_LLVM_SHARED USE_SHARED)
 endif()
 
 ################################################################################
 # C++ version
 ################################################################################
-if ("${CMAKE_VERSION}" VERSION_LESS "3.1")
-  add_global_cxx_flag("-std=c++11" REQUIRED)
-else ()
-  set(CMAKE_CXX_STANDARD 11)
-  set(CMAKE_CXX_STANDARD_REQUIRED ON)
-endif ()
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 ################################################################################
 # Warnings
@@ -329,7 +232,7 @@ if (NOT LLVM_ENABLE_EH)
   if (ENABLE_SOLVER_METASMT)
     message(WARNING "Not disabling exceptions because metaSMT uses them")
   else()
-    klee_component_add_cxx_flag("-fno-exceptions" REQUIRED)
+    list(APPEND KLEE_COMPONENT_CXX_FLAGS "-fno-exceptions")
   endif()
 endif()
 
@@ -343,7 +246,7 @@ if (NOT LLVM_ENABLE_RTTI)
       "This build configuration is not supported and will likely not work."
       "You should recompile LLVM with RTTI enabled.")
   else()
-    klee_component_add_cxx_flag("-fno-rtti" REQUIRED)
+    list(APPEND KLEE_COMPONENT_CXX_FLAGS "-fno-rtti")
   endif()
 endif()
 
@@ -379,14 +282,19 @@ OPTION(ENABLE_TCMALLOC "Enable TCMalloc support" ON)
 if (ENABLE_TCMALLOC)
   message(STATUS "TCMalloc support enabled")
   set(TCMALLOC_HEADER "gperftools/malloc_extension.h")
-  find_path(TCMALLOC_INCLUDE_DIR "${TCMALLOC_HEADER}")
+  find_path(TCMALLOC_INCLUDE_DIR
+    "${TCMALLOC_HEADER}"
+    HINTS "${TCMALLOC_DIR}/include"
+    )
   cmake_push_check_state()
-  set(CMAKE_REQUIRED_INCLUDES "${TCMALLOC_INCLUDE_DIR}")
-  check_include_file_cxx("${TCMALLOC_HEADER}" HAVE_GPERFTOOLS_MALLOC_EXTENSION_H)
+  list(APPEND CMAKE_REQUIRED_INCLUDES ${TCMALLOC_INCLUDE_DIR})
+  check_include_file_CXX("${TCMALLOC_HEADER}" HAVE_GPERFTOOLS_MALLOC_EXTENSION_H)
   cmake_pop_check_state()
+
   if (${HAVE_GPERFTOOLS_MALLOC_EXTENSION_H})
     find_library(TCMALLOC_LIBRARIES
       NAMES tcmalloc tcmalloc_minimal
+      HINTS "${TCMALLOC_DIR}/lib"
       DOC "TCMalloc libraries"
     )
     if (NOT TCMALLOC_LIBRARIES)
@@ -395,15 +303,10 @@ if (ENABLE_TCMALLOC)
     endif()
     list(APPEND KLEE_COMPONENT_EXTRA_LIBRARIES ${TCMALLOC_LIBRARIES})
     list(APPEND KLEE_COMPONENT_EXTRA_INCLUDE_DIRS ${TCMALLOC_INCLUDE_DIR})
-    if (("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang") OR ("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU"))
-      # TCMalloc's documentation says its safest to pass these flags when
-      # building with gcc because gcc can optimize assuming its using its own
-      # malloc.
-      klee_component_add_cxx_flag(-fno-builtin-malloc REQUIRED)
-      klee_component_add_cxx_flag(-fno-builtin-calloc REQUIRED)
-      klee_component_add_cxx_flag(-fno-builtin-realloc REQUIRED)
-      klee_component_add_cxx_flag(-fno-builtin-free REQUIRED)
-    endif()
+    # TCMalloc's documentation says its safest to pass these flags when
+    # building with gcc because gcc can optimize assuming its using its own
+    # malloc.
+    list(APPEND KLEE_COMPONENT_CXX_FLAGS "-fno-builtin-malloc" "-fno-builtin-calloc" "-fno-builtin-realloc" "-fno-builtin-free")
   else()
     message(FATAL_ERROR "Can't find \"${TCMALLOC_HEADER}\"")
   endif()
@@ -411,6 +314,14 @@ else()
   unset(HAVE_GPERFTOOLS_MALLOC_EXTENSION_H)
   unset(HAVE_GPERFTOOLS_MALLOC_EXTENSION_H CACHE)
   message(STATUS "TCMalloc support disabled")
+endif()
+
+################################################################################
+# Detect SQLite3
+################################################################################
+find_package(SQLite3)
+if (NOT SQLITE3_FOUND)
+  message( FATAL_ERROR "SQLite3 not found, please install" )
 endif()
 
 ################################################################################
@@ -422,9 +333,9 @@ if (HAVE_SYS_CAPABILITY_H)
     NAMES cap
     DOC "libcap library"
   )
-# On FreeBSD <sys/capabilities.h> is present in libc, so we don't require libcap there.
-  if (NOT LIBCAP_LIBRARIES AND NOT CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
-    message(FATAL_ERROR "Found \"sys/capability.h\" but could not find libcap")
+# On FreeBSD <sys/capability.h> is a different thing
+  if (NOT LIBCAP_LIBRARIES OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    set(HAVE_SYS_CAPABILITY_H 0)
   endif()
 else()
   set(LIBCAP_LIBRARIES "")
@@ -435,7 +346,8 @@ endif()
 ################################################################################
 check_include_file(pty.h HAVE_PTY_H)
 check_include_file(util.h HAVE_UTIL_H)
-if (HAVE_PTY_H OR HAVE_UTIL_H)
+check_include_file(libutil.h HAVE_LIBUTIL_H)
+if (HAVE_PTY_H OR HAVE_UTIL_H OR HAVE_LIBUTIL_H)
   check_function_exists(openpty openpty_in_libc)
   if (NOT openpty_in_libc)
     check_library_exists(util openpty "" openpty_in_libutil)
@@ -445,13 +357,14 @@ if (HAVE_PTY_H OR HAVE_UTIL_H)
       message(FATAL_ERROR "Could not find libutil")
     endif (openpty_in_libutil)
   endif (NOT openpty_in_libc)
-endif (HAVE_PTY_H OR HAVE_UTIL_H)
+endif (HAVE_PTY_H OR HAVE_UTIL_H OR HAVE_LIBUTIL_H)
 
 ################################################################################
 # Miscellaneous header file detection
 ################################################################################
 check_cxx_symbol_exists(__ctype_b_loc ctype.h HAVE_CTYPE_EXTERNALS)
 check_cxx_symbol_exists(mallinfo malloc.h HAVE_MALLINFO)
+check_cxx_symbol_exists(mallinfo2 malloc.h HAVE_MALLINFO2)
 check_cxx_symbol_exists(malloc_zone_statistics malloc/malloc.h HAVE_MALLOC_ZONE_STATISTICS)
 
 check_include_file(sys/statfs.h HAVE_SYSSTATFS_H)
@@ -497,23 +410,6 @@ else()
 endif()
 
 ################################################################################
-# Global clean target
-################################################################################
-# CMake already uses the "clean" target name but it doesn't clean everything
-# unfortunately. We can't modify the target so we provide our own "clean_all"
-# target that runs clean. Other rules for performing clean up should declare
-# that "clean_all" depends on those rules.
-add_custom_target(clean_all
-  # Invoke CMake's own clean target
-  COMMAND
-    "${CMAKE_COMMAND}"
-    "--build"
-    "${CMAKE_BINARY_DIR}"
-    "--target"
-    "clean"
-)
-
-################################################################################
 # KLEE runtime support
 ################################################################################
 # This is set here and not in `runtime` because `config.h` needs to be generated.
@@ -530,7 +426,7 @@ set(available_klee_runtime_build_types
 if (NOT KLEE_RUNTIME_BUILD_TYPE)
   message(STATUS "KLEE_RUNTIME_BUILD_TYPE is not set. Setting default")
   message(STATUS "The available runtime build types are: ${available_klee_runtime_build_types}")
-  set(KLEE_RUNTIME_BUILD_TYPE "Debug+Asserts" CACHE String
+  set(KLEE_RUNTIME_BUILD_TYPE "Debug+Asserts" CACHE STRING
     "Options are ${available_klee_runtime_build_types}"
     FORCE)
 endif()
@@ -540,10 +436,26 @@ set_property(CACHE
   PROPERTY STRINGS ${available_klee_runtime_build_types})
 message(STATUS "KLEE_RUNTIME_BUILD_TYPE: ${KLEE_RUNTIME_BUILD_TYPE}")
 
+# Check availability of 32bit support for platform
+include(CheckCSourceRuns)
+cmake_push_check_state()
+set(CMAKE_REQUIRED_FLAGS "-m32")
+check_c_source_runs("int main(int argc, char** argv){return 0;}" CHECK_M32_SUPPORT)
+cmake_pop_check_state()
+if (NOT CHECK_M32_SUPPORT)
+  set(M32_SUPPORTED 0)
+else()
+  set(M32_SUPPORTED 1)
+endif()
+
+message(STATUS "32bit platform supported: ${M32_SUPPORTED}")
+
 set(KLEE_INSTALL_RUNTIME_DIR "${CMAKE_INSTALL_FULL_LIBDIR}/klee/runtime")
 
 # Location where KLEE will look for the built runtimes by default.
-set(KLEE_RUNTIME_DIRECTORY "${CMAKE_BINARY_DIR}/${KLEE_RUNTIME_BUILD_TYPE}/lib")
+set(KLEE_RUNTIME_DIRECTORY "${CMAKE_BINARY_DIR}/runtime/lib")
+
+file(MAKE_DIRECTORY ${KLEE_RUNTIME_DIRECTORY})
 
 ################################################################################
 # KLEE POSIX Runtime Support
@@ -551,11 +463,6 @@ set(KLEE_RUNTIME_DIRECTORY "${CMAKE_BINARY_DIR}/${KLEE_RUNTIME_BUILD_TYPE}/lib")
 option(ENABLE_POSIX_RUNTIME "Enable KLEE's POSIX runtime" OFF)
 if (ENABLE_POSIX_RUNTIME)
   message(STATUS "POSIX runtime enabled")
-  if (NOT ENABLE_KLEE_UCLIBC)
-    message(WARNING "Enabling POSIX runtime without klee-uclibc support."
-      "The runtime might not work without it. Pass `-DENABLE_KLEE_UCLIBC=ON`"
-      " to enable klee-uclibc support.")
-  endif()
 else()
   message(STATUS "POSIX runtime disabled")
 endif()
@@ -563,62 +470,124 @@ endif()
 ################################################################################
 # KLEE uclibc support
 ################################################################################
-option(ENABLE_KLEE_UCLIBC "Enable support for klee-uclibc" OFF)
-if (ENABLE_KLEE_UCLIBC)
-  message(STATUS "klee-uclibc support enabled")
-  set(SUPPORT_KLEE_UCLIBC 1) # For config.h
-  set(KLEE_UCLIBC_PATH "" CACHE PATH "Path to klee-uclibc root directory")
-  if (NOT IS_DIRECTORY "${KLEE_UCLIBC_PATH}")
-    message(FATAL_ERROR
-      "KLEE_UCLIBC_PATH (\"${KLEE_UCLIBC_PATH}\") is not a valid directory.\n"
-      "Try passing -DKLEE_UCLIBC_PATH=<path> to cmake where <path> is the path"
-      " to the root of the klee-uclibc directory.")
-  endif()
-
+set(KLEE_UCLIBC_PATH "" CACHE PATH "Path to klee-uclibc root directory")
+set(KLEE_UCLIBC_BCA_NAME "klee-uclibc.bca")
+if (NOT KLEE_UCLIBC_PATH STREQUAL "")
   # Find the C library bitcode archive
-  set(KLEE_UCLIBC_BCA_NAME "klee-uclibc.bca")
   set(KLEE_UCLIBC_C_BCA "${KLEE_UCLIBC_PATH}/lib/libc.a")
   if (NOT EXISTS "${KLEE_UCLIBC_C_BCA}")
     message(FATAL_ERROR
-      "klee-uclibc library not found at \"${KLEE_UCLIBC_C_BCA}\"")
+      "klee-uclibc library not found at \"${KLEE_UCLIBC_C_BCA}\". Set KLEE_UCLIBC_PATH to klee-uclibc root directory or empty string.")
   endif()
   message(STATUS "Found klee-uclibc library: \"${KLEE_UCLIBC_C_BCA}\"")
-
-  # Make a symlink to KLEE_UCLIBC_C_BCA so KLEE can find it where it
-  # is expected.
-  file(MAKE_DIRECTORY "${KLEE_RUNTIME_DIRECTORY}")
-  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+  # Copy KLEE_UCLIBC_C_BCA so KLEE can find it where it is expected.
+  execute_process(COMMAND ${CMAKE_COMMAND} -E copy
     "${KLEE_UCLIBC_C_BCA}"
     "${KLEE_RUNTIME_DIRECTORY}/${KLEE_UCLIBC_BCA_NAME}"
   )
-  list(APPEND KLEE_COMPONENT_CXX_DEFINES
-    -DKLEE_UCLIBC_BCA_NAME=\"${KLEE_UCLIBC_BCA_NAME}\")
+else()
+  message(STATUS "Skipping copying of klee-uclibc runtime")
+endif()
 
-  # Add klee-uclibc to the install target. We install the original
-  # file rather than the symlink because CMake would just copy the symlink
-  # rather than the file.
-  install(FILES "${KLEE_UCLIBC_C_BCA}"
-    DESTINATION "${KLEE_INSTALL_RUNTIME_DIR}"
-    RENAME "${KLEE_UCLIBC_BCA_NAME}"
-    )
+################################################################################
+# KLEE libc++ support
+################################################################################
+option(ENABLE_KLEE_LIBCXX "Enable libc++ for klee" OFF)
+if (ENABLE_KLEE_LIBCXX)
+  message(STATUS "klee-libc++ support enabled")
+  set(SUPPORT_KLEE_LIBCXX 1) # For config.h
+  set(KLEE_LIBCXX_DIR "" CACHE PATH "Path to directory containing libc++ shared object (bitcode)")
+  if (NOT EXISTS "${KLEE_LIBCXX_DIR}")
+    message(FATAL_ERROR
+      "KLEE_LIBCXX_DIR (\"${KLEE_LIBCXX_DIR}\") does not exist.\n"
+      "Try passing -DKLEE_LIBCXX_DIR=<path> to CMake where <path> is the path"
+      "to the directory containing the libc++ shared object file (as bitcode).")
+  endif()
+
+  set(KLEE_LIBCXX_INCLUDE_DIR "" CACHE PATH "Path to libc++ include directory")
+  if (NOT EXISTS "${KLEE_LIBCXX_INCLUDE_DIR}")
+    message(FATAL_ERROR
+      "KLEE_LIBCXX_INCLUDE_DIR (\"${KLEE_LIBCXX_INCLUDE_DIR}\") does not exist.\n"
+      "Try passing -DKLEE_LIBCXX_INCLUDE_DIR=<path> to CMake where <path> is the"
+      "libc++ include directory.")
+  endif()
+  message(STATUS "Use libc++ include path: \"${KLEE_LIBCXX_INCLUDE_DIR}\"")
+
+  # Find the library bitcode archive
+
+  # Check for static first
+  set(KLEE_LIBCXX_BC_NAME "libc++.bca")
+  set(KLEE_LIBCXX_BC_PATH "${KLEE_LIBCXX_DIR}/lib/${KLEE_LIBCXX_BC_NAME}")
+  if (NOT EXISTS "${KLEE_LIBCXX_BC_PATH}")
+    # Check for dynamic so lib
+    set(KLEE_LIBCXX_BC_NAME "libc++.so.bc")
+    set(KLEE_LIBCXX_BC_PATH "${KLEE_LIBCXX_DIR}/lib/${KLEE_LIBCXX_BC_NAME}")
+    if (NOT EXISTS "${KLEE_LIBCXX_BC_PATH}")
+      set(KLEE_LIBCXX_BC_NAME "libc++.dylib.bc")
+      set(KLEE_LIBCXX_BC_PATH "${KLEE_LIBCXX_DIR}/lib/${KLEE_LIBCXX_BC_NAME}")
+      if (NOT EXISTS "${KLEE_LIBCXX_BC_PATH}")
+        message(FATAL_ERROR
+          "libc++ library not found at \"${KLEE_LIBCXX_DIR}\"")
+      endif()
+    endif()
+  endif()
+  message(STATUS "Found libc++ library: \"${KLEE_LIBCXX_BC_PATH}\"")
+
+  # Copy KLEE_LIBCXX_BC_PATH so KLEE can find it where it is expected.
+  file(MAKE_DIRECTORY "${KLEE_RUNTIME_DIRECTORY}")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E copy
+    "${KLEE_LIBCXX_BC_PATH}"
+    "${KLEE_RUNTIME_DIRECTORY}/${KLEE_LIBCXX_BC_NAME}"
+  )
+  list(APPEND KLEE_COMPONENT_CXX_DEFINES
+    -DKLEE_LIBCXX_BC_NAME=\"${KLEE_LIBCXX_BC_NAME}\")
 
 else()
-  message(STATUS "klee-uclibc support disabled")
-  set(SUPPORT_KLEE_UCLIBC 0) # For config.h
+  message(STATUS "libc++ support disabled")
+  set(SUPPORT_KLEE_LIBCXX 0) # For config.h
+endif()
+
+################################################################################
+# KLEE Exception Handling Support for C++
+################################################################################
+option(ENABLE_KLEE_EH_CXX "Enable support for C++ Exceptions" OFF)
+if (ENABLE_KLEE_EH_CXX)
+  if (NOT ENABLE_KLEE_LIBCXX)
+    message(FATAL_ERROR "C++ Exception support requires klee-libc++."
+      "Pass -DENABLE_KLEE_LIBCXX=ON to CMake to enable it.")
+  endif()
+
+  set(KLEE_LIBCXXABI_SRC_DIR "" CACHE PATH "Path to libc++abi source directory")
+  if (NOT EXISTS "${KLEE_LIBCXXABI_SRC_DIR}")
+    message(FATAL_ERROR
+      "KLEE_LIBCXXABI_SRC_DIR (\"${KLEE_LIBCXXABI_SRC_DIR}\") does not exist.\n"
+      "Try passing -DKLEE_LIBCXXABI_SRC_DIR=<path> to CMake where <path> is the"
+      "libc++abi source directory.")
+  endif()
+  message(STATUS "Use libc++abi source path: \"${KLEE_LIBCXXABI_SRC_DIR}\"")
+
+  set(SUPPORT_KLEE_EH_CXX 1) # For config.h
+  message(STATUS "Support for C++ Exceptions enabled")
+
+else()
+  set(SUPPORT_KLEE_EH_CXX 0) # For config.h
 endif()
 
 ################################################################################
 # Sanitizer support
 ################################################################################
-message(STATUS "${CMAKE_CXX_FLAGS}")
+message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
 set(IS_ASAN_BUILD 0)
 set(IS_UBSAN_BUILD 0)
-string(REPLACE " " ";" _flags ${CMAKE_CXX_FLAGS})
+set(IS_MSAN_BUILD 0)
+string(REPLACE " " ";" _flags "${CMAKE_CXX_FLAGS}")
 foreach(arg IN ITEMS ${_flags})
   if (${arg} STREQUAL -fsanitize=address)
     set(IS_ASAN_BUILD 1)
   elseif (${arg} STREQUAL -fsanitize=undefined)
     set(IS_UBSAN_BUILD 1)
+  elseif (${arg} STREQUAL -fsanitize=memory)
+    set(IS_MSAN_BUILD 1)
   endif()
 endforeach()
 unset(_flags)
@@ -649,10 +618,10 @@ configure_file(${CMAKE_SOURCE_DIR}/include/klee/Config/CompileTimeInfo.h.cmin
 )
 
 ################################################################################
-# Global include directories
+# Set KLEE-specific include files
 ################################################################################
-include_directories("${CMAKE_BINARY_DIR}/include")
-include_directories("${CMAKE_SOURCE_DIR}/include")
+
+set(KLEE_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/include)
 
 ################################################################################
 # Set default location for targets in the build directory
@@ -675,7 +644,6 @@ message(STATUS "KLEE_SOLVER_LIBRARIES: '${KLEE_SOLVER_LIBRARIES}'")
 ################################################################################
 # KLEE components
 ################################################################################
-include("${CMAKE_SOURCE_DIR}/cmake/klee_add_component.cmake")
 add_subdirectory(lib)
 add_subdirectory(runtime)
 
@@ -689,16 +657,6 @@ add_subdirectory(tools)
 ################################################################################
 option(ENABLE_UNIT_TESTS "Enable unit tests" OFF)
 option(ENABLE_SYSTEM_TESTS "Enable system tests" ON)
-
-# This provides a migration path for older build directories that have this
-# variable set in their cache. Leaving it behind could lead to confusion so
-# removing it is probably a good idea.
-# TODO: Remove this eventually (probably next release or something).
-if (DEFINED ENABLE_TESTS)
-  message(WARNING "You have the \"ENABLE_TESTS\" variable is your CMake cache."
-    "This variable no longer has any meaning so removing it from your cache")
-  unset(ENABLE_TESTS CACHE)
-endif()
 
 if (ENABLE_UNIT_TESTS OR ENABLE_SYSTEM_TESTS)
   message(STATUS "Testing is enabled")
@@ -769,3 +727,19 @@ endif()
 # Miscellaneous install
 ################################################################################
 install(FILES include/klee/klee.h DESTINATION include/klee)
+
+################################################################################
+# Uninstall rule
+################################################################################
+configure_file(
+  "${PROJECT_SOURCE_DIR}/cmake/cmake_uninstall.cmake.in"
+  "${CMAKE_BINARY_DIR}/cmake_uninstall.cmake"
+	@ONLY
+)
+
+add_custom_target(uninstall
+  COMMAND
+  "${CMAKE_COMMAND}" -P "${CMAKE_BINARY_DIR}/cmake_uninstall.cmake"
+  COMMENT "Uninstalling..."
+  VERBATIM
+)

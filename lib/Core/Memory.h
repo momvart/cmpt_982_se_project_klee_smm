@@ -12,14 +12,15 @@
 
 #include "Context.h"
 #include "TimingSolver.h"
-#include "klee/Expr.h"
+
+#include "klee/Expr/Expr.h"
 #include "klee/util/BitArray.h"
 #include "klee/Internal/Module/InstructionInfoTable.h"
 
 #include "llvm/ADT/StringExtras.h"
 
-#include <vector>
 #include <string>
+#include <vector>
 
 namespace llvm {
   class Value;
@@ -27,10 +28,11 @@ namespace llvm {
 
 namespace klee {
 
-//class BitArray;
+class ArrayCache;
+class BitArray;
+class ExecutionState;
 class MemoryManager;
 class Solver;
-class ArrayCache;
 struct KFunction;
 
 class FreeOffsets {
@@ -47,10 +49,13 @@ class MemoryObject {
   friend class STPBuilder;
   friend class ObjectState;
   friend class ExecutionState;
+  friend class ref<MemoryObject>;
+  friend class ref<const MemoryObject>;
 
 private:
   static int counter;
-  mutable unsigned refCount;
+  /// @brief Required by klee::ref-managed objects
+  mutable class ReferenceCounter _refCount;
 
 public:
   //maps address (offset in the object) -> (size, name)
@@ -60,6 +65,7 @@ public:
 
   /// size in bytes
   unsigned size;
+  unsigned alignment;
   mutable std::string name;
 
   bool isLocal;
@@ -78,12 +84,6 @@ public:
   /// it was allocated for (or whatever else makes sense).
   const llvm::Value *allocSite;
   std::unique_ptr<std::vector<std::pair<KFunction*, const InstructionInfo*>>> allocContext;
-  
-  /// A list of boolean expressions the user has requested be true of
-  /// a counterexample. Mutable since we play a little fast and loose
-  /// with allowing it to be added to during execution (although
-  /// should sensibly be only at creation time).
-  mutable std::vector< ref<Expr> > cexPreferences;
 
   // DO NOT IMPLEMENT
   MemoryObject(const MemoryObject &b);
@@ -93,10 +93,10 @@ public:
   // XXX this is just a temp hack, should be removed
   explicit
   MemoryObject(uint64_t _address) 
-    : refCount(0),
-      id(counter++), 
+    : id(counter++),
       address(_address),
       size(0),
+      alignment(0),
       isFixed(true),
       freeSpace(NULL),
       isUserSpecified(false),
@@ -105,14 +105,14 @@ public:
       allocSite(0) {
   }
 
-  MemoryObject(uint64_t _address, unsigned _size, 
+  MemoryObject(uint64_t _address, unsigned _size, unsigned _alignment,
                bool _isLocal, bool _isGlobal, bool _isFixed,
                const llvm::Value *_allocSite,
                MemoryManager *_parent)
-    : refCount(0), 
-      id(counter++),
+    : id(counter++),
       address(_address),
       size(_size),
+      alignment(_alignment),
       name("unnamed"),
       isLocal(_isLocal),
       isGlobal(_isGlobal),
@@ -166,26 +166,52 @@ public:
       return ConstantExpr::alloc(0, Expr::Bool);
     }
   }
+
+  /// Compare this object with memory object b.
+  /// \param b memory object to compare with
+  /// \return <0 if this is smaller, 0 if both are equal, >0 if b is smaller
+  int compare(const MemoryObject &b) const {
+    // Short-cut with id
+    if (id == b.id)
+      return 0;
+    if (address != b.address)
+      return (address < b.address ? -1 : 1);
+
+    if (size != b.size)
+      return (size < b.size ? -1 : 1);
+
+    if (allocSite != b.allocSite)
+      return (allocSite < b.allocSite ? -1 : 1);
+
+    return 0;
+  }
 };
 
 class ObjectState {
 private:
   friend class AddressSpace;
+  friend class ref<ObjectState>;
+
   unsigned copyOnWriteOwner; // exclusively for AddressSpace
 
-  friend class ObjectHolder;
-  unsigned refCount;
+  /// @brief Required by klee::ref-managed objects
+  class ReferenceCounter _refCount;
 
+  ref<const MemoryObject> object;
 
+  /// @brief Holds all known concrete bytes
   uint8_t *concreteStore;
 
-  // XXX cleanup name of flushMask (its backwards or something)
+  /// @brief concreteMask[byte] is set if byte is known to be concrete
   BitArray *concreteMask;
 
-  // mutable because may need flushed during read of const
-  mutable BitArray *flushMask;
-
+  /// knownSymbolics[byte] holds the symbolic expression for byte,
+  /// if byte is known to be symbolic
   ref<Expr> *knownSymbolics;
+
+  /// unflushedMask[byte] is set if byte is unflushed
+  /// mutable because may need flushed during read of const
+  mutable BitArray *unflushedMask;
 
   // mutable because we may need flush during read of const
   mutable UpdateList updates;
@@ -210,22 +236,22 @@ public:
   ObjectState(const ObjectState &os);
   ~ObjectState();
 
-  const MemoryObject *getObject() const { return object; }
+  const MemoryObject *getObject() const { return object.get(); }
   const Array *getArray() const { return updates.root; }
 
   void realloc(unsigned int newSize);
   void setReadOnly(bool ro) { readOnly = ro; }
 
-  // make contents all concrete and zero
+  /// Make contents all concrete and zero
   void initializeToZero();
-  // make contents all concrete and random
+
+  /// Make contents all concrete and random
   void initializeToRandom();
 
   ref<Expr> read(ref<Expr> offset, Expr::Width width) const;
   ref<Expr> read(unsigned offset, Expr::Width width) const;
   ref<Expr> read8(unsigned offset) const;
 
-  // return bytes written.
   void write(unsigned offset, ref<Expr> value);
   void write(ref<Expr> offset, ref<Expr> value);
 
@@ -258,9 +284,14 @@ private:
   void flushRangeForRead(unsigned rangeBase, unsigned rangeSize) const;
   void flushRangeForWrite(unsigned rangeBase, unsigned rangeSize);
 
+  /// isByteConcrete ==> !isByteKnownSymbolic
   bool isByteConcrete(unsigned offset) const;
-  bool isByteFlushed(unsigned offset) const;
+
+  /// isByteKnownSymbolic ==> !isByteConcrete
   bool isByteKnownSymbolic(unsigned offset) const;
+
+  /// isByteUnflushed(i) => (isByteConcrete(i) || isByteKnownSymbolic(i))
+  bool isByteUnflushed(unsigned offset) const;
 
   void markByteConcrete(unsigned offset);
   void markByteSymbolic(unsigned offset);
@@ -273,4 +304,4 @@ private:
   
 } // End klee namespace
 
-#endif
+#endif /* KLEE_MEMORY_H */

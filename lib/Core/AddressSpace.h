@@ -10,14 +10,14 @@
 #ifndef KLEE_ADDRESSSPACE_H
 #define KLEE_ADDRESSSPACE_H
 
-#include "ObjectHolder.h"
+#include "Memory.h"
 
 #include "Memory.h"
 #include "MemoryManager.h"
 #include <sys/mman.h>
-#include "klee/Expr.h"
-#include "klee/Internal/ADT/ImmutableMap.h"
-#include "klee/Internal/System/Time.h"
+#include "klee/Expr/Expr.h"
+#include "klee/ADT/ImmutableMap.h"
+#include "klee/System/Time.h"
 #include "klee/Internal/Support/ErrorHandling.h"
 
 namespace klee {
@@ -35,8 +35,9 @@ namespace klee {
   struct MemoryObjectLT {
     bool operator()(const MemoryObject *a, const MemoryObject *b) const;
   };
-  
-  typedef ImmutableMap<const MemoryObject*, ObjectHolder, MemoryObjectLT> MemoryMap;
+
+  typedef ImmutableMap<const MemoryObject *, ref<ObjectState>, MemoryObjectLT>
+      MemoryMap;
 
   class AddressSpace {
   private:
@@ -154,7 +155,11 @@ namespace klee {
 
     /// Copy the concrete values of all managed ObjectStates into the
     /// actual system memory location they were allocated at.
-    void copyOutConcretes();
+    /// Returns the (hypothetical) number of pages needed provided each written
+    /// object occupies (at least) a single page.
+    std::size_t copyOutConcretes();
+
+    void copyOutConcrete(const MemoryObject *mo, const ObjectState *os) const;
 
     /// Copy the concrete values of all managed ObjectStates back from
     /// the actual system memory location they were allocated
@@ -177,4 +182,4 @@ namespace klee {
   };
 } // End klee namespace
 
-#endif
+#endif /* KLEE_ADDRESSSPACE_H */

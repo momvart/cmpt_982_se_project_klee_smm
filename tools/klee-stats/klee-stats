@@ -1,113 +1,135 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- encoding: utf-8 -*-
 
 # ===-- klee-stats --------------------------------------------------------===##
-# 
+#
 #                      The KLEE Symbolic Virtual Machine
-# 
+#
 #  This file is distributed under the University of Illinois Open Source
 #  License. See LICENSE.TXT for details.
-# 
+#
 # ===----------------------------------------------------------------------===##
 
-"""Output statistics logged by Klee."""
-
-# use '/' to mean true division and '//' to mean floor division
-from __future__ import division
-from __future__ import print_function
+"""Output statistics logged by KLEE."""
 
 import os
-import re
 import sys
 import argparse
+import sqlite3
+import collections
 
-from operator import itemgetter
-try:
-    from tabulate import TableFormat, Line, DataRow, tabulate
-except:
-    print('Error: Package "tabulate" required for table formatting. '
-          'Please install it using "pip" or your package manager.',
-          file=sys.stderr)
-    exit(1)
-
+# Mapping of: (column head, explanation, internal klee name)
+# column head must start with a capital letter
 Legend = [
-    ('Instrs', 'number of executed instructions'),
-    ('Time', 'total wall time (s)'),
-    ('TUser', 'total user time'),
-    ('ICov', 'instruction coverage in the LLVM bitcode (%)'),
-    ('BCov', 'branch coverage in the LLVM bitcode (%)'),
-    ('ICount', 'total static instructions in the LLVM bitcode'),
-    ('TSolver', 'time spent in the constraint solver'),
-    ('States', 'number of currently active states'),
-    ('Mem', 'megabytes of memory currently used'),
-    ('Queries', 'number of queries issued to STP'),
-    ('AvgQC', 'average number of query constructs per query'),
-    ('Tcex', 'time spent in the counterexample caching code'),
-    ('Tfork', 'time spent forking'),
-    ('TResolve', 'time spent in object resolution'),
-    ('QCexCMisses', 'Counterexample cache misses'),
-    ('QCexCHits', 'Counterexample cache hits'),
+    # core stats
+    ('Instrs', 'number of executed instructions', "Instructions"),
+    ('Time(s)', 'total wall time', "WallTime"),
+    ('ICov(%)', 'instruction coverage in the LLVM bitcode', "ICov"),
+    ('BCov(%)', 'conditional branch (br) coverage in the LLVM bitcode', "BCov"),
+    ('ICount', 'total static instructions in the LLVM bitcode', "ICount"),
+    ('TSolver(%)', 'relative time spent in the solver chain wrt wall time (incl. caches and constraint solver)', "RelSolverTime"),
+    # extended stats
+    # - code and coverage
+    ('ICovered', 'total covered instructions in the LLVM bitcode', "CoveredInstructions"),
+    ('IUncovered', 'total uncovered instructions in the LLVM bitcode', "UncoveredInstructions"),
+    ('Branches', 'number of conditional branch (br) instructions in the LLVM bitcode', 'NumBranches'),
+    ('FullBranches', 'number of fully-explored conditional branch (br) instructions in the LLVM bitcode', 'FullBranches'),
+    ('PartialBranches', 'number of partially-explored conditional branch (br) instructions in the LLVM bitcode', 'PartialBranches'),
+    ('ExternalCalls', 'number of external calls', 'ExternalCalls'),
+    # - time
+    ('TUser(s)', 'total user time', "UserTime"),
+    ('TResolve(s)', 'time spent in object resolution', "ResolveTime"),
+    ('TResolve(%)', 'relative time spent in object resolution wrt wall time', "RelResolveTime"),
+    ('TCex(s)', 'time spent in the counterexample caching code (incl. constraint solver)', "CexCacheTime"),
+    ('TCex(%)', 'relative time spent in the counterexample caching code wrt wall time (incl. constraint solver)', "RelCexCacheTime"),
+    ('TQuery(s)', 'time spent in the constraint solver', "QueryTime"),
+    ('TSolver(s)', 'time spent in the solver chain (incl. caches and constraint solver)', "SolverTime"),
+    # - states
+    ('States', 'number of created states', "States"),
+    ('ActiveStates', 'number of currently active states (0 after successful termination)', "NumStates"),
+    ('MaxActiveStates', 'maximum number of active states', "MaxStates"),
+    ('AvgActiveStates', 'average number of active states', "AvgStates"),
+    ('InhibitedForks', 'number of inhibited state forks due to e.g. memory pressure', "InhibitedForks"),
+    # - constraint caching/solving
+    ('Queries', 'number of queries issued to the solver chain', "Queries"),
+    ('SolverQueries', 'number of queries issued to the constraint solver', "SolverQueries"),
+    ('SolverQueryConstructs', 'number of query constructs for all queries send to the constraint solver', "NumQueryConstructs"),
+    ('AvgSolverQuerySize', 'average number of query constructs per query issued to the constraint solver', "AvgQC"),
+    ('QCacheMisses', 'Query cache misses', "QueryCacheMisses"),
+    ('QCacheHits', 'Query cache hits', "QueryCacheHits"),
+    ('QCexCacheMisses', 'Counterexample cache misses', "QueryCexCacheMisses"),
+    ('QCexCacheHits', 'Counterexample cache hits', "QueryCexCacheHits"),
+    # - memory
+    ('Allocations', 'number of allocated heap objects of the program under test', "Allocations"),
+    ('Mem(MiB)', 'mebibytes of memory currently used', "MallocUsage"),
+    ('MaxMem(MiB)', 'maximum memory usage', "MaxMem"),
+    ('AvgMem(MiB)', 'average memory usage', "AvgMem"),
+    # - branch types
+    ('BrConditional', 'number of forks caused by symbolic branch conditions (br)', "BranchesConditional"),
+    ('BrIndirect', 'number of forks caused by indirect branches (indirectbr) with symbolic address', "BranchesIndirect"),
+    ('BrSwitch', 'number of forks caused by switch with symbolic value', "BranchesSwitch"),
+    ('BrCall', 'number of forks caused by symbolic function pointers', "BranchesCall"),
+    ('BrMemOp', 'number of forks caused by memory operation with symbolic address', "BranchesMemOp"),
+    ('BrResolvePointer', 'number of forks caused by symbolic pointers', "BranchesResolvePointer"),
+    ('BrAlloc', 'number of forks caused by symbolic allocation size', "BranchesAlloc"),
+    ('BrRealloc', 'number of forks caused by symbolic reallocation size', "BranchesRealloc"),
+    ('BrFree', 'number of forks caused by freeing a symbolic pointer', "BranchesFree"),
+    ('BrGetVal', 'number of forks caused by user-invoked concretization while seeding', "BranchesGetVal"),
+    # - termination classes
+    ('TermExit', 'number of states that reached end of execution path', "TerminationExit"),
+    ('TermEarly', 'number of early terminated states (e.g. due to memory pressure, state limt)', "TerminationEarly"),
+    ('TermSolverErr', 'number of states terminated due to solver errors', "TerminationSolverError"),
+    ('TermProgrErr', 'number of states terminated due to program errors (e.g. division by zero)', "TerminationProgramError"),
+    ('TermUserErr', 'number of states terminated due to user errors (e.g. misuse of KLEE API)', "TerminationUserError"),
+    ('TermExecErr', 'number of states terminated due to execution errors (e.g. unsupported intrinsics)', "TerminationExecutionError"),
+    ('TermEarlyAlgo', 'number of state terminations required by algorithm (e.g. state merging or replaying)', "TerminationEarlyAlgorithm"),
+    ('TermEarlyUser', 'number of states terminated via klee_silent_exit()', "TerminationEarlyUser"),
+    # - debugging
+    ('TArrayHash(s)', 'time spent hashing arrays (if KLEE_ARRAY_DEBUG enabled, otherwise -1)', "ArrayHashTime"),
+    ('TFork(s)', 'time spent forking states', "ForkTime"),
+    ('TFork(%)', 'relative time spent forking states wrt wall time', "RelForkTime"),
+    ('TUser(%)', 'relative user time wrt wall time', "RelUserTime"),
 ]
 
-KleeTable = TableFormat(lineabove=Line("-", "-", "-", "-"),
-                        linebelowheader=Line("-", "-", "-", "-"),
-                        linebetweenrows=None,
-                        linebelow=Line("-", "-", "-", "-"),
-                        headerrow=DataRow("|", "|", "|"),
-                        datarow=DataRow("|", "|", "|"),
-                        padding=0,
-                        with_header_hide=None)
+def getInfoFile(path):
+    """Return the path to info"""
+    return os.path.join(path, 'info')
 
 def getLogFile(path):
     """Return the path to run.stats."""
     return os.path.join(path, 'run.stats')
 
-
 class LazyEvalList:
     """Store all the lines in run.stats and eval() when needed."""
-    def __init__(self, lines):
+    def __init__(self, fileName):
         # The first line in the records contains headers.
-        self.lines = lines[1:]
+      self.filename = fileName
 
-    def __getitem__(self, index):
-        if isinstance(self.lines[index], str):
-            self.lines[index] = eval(self.lines[index])
-        return self.lines[index]
+    def conn(self):
+        return sqlite3.connect(self.filename)
 
-    def __len__(self):
-        return len(self.lines)
+    def aggregateRecords(self):
+        try:
+            memC = self.conn().execute("SELECT max(MallocUsage)*1.0 / 1024 / 1024, avg(MallocUsage) / 1024 / 1024 from stats")
+            maxMem, avgMem = memC.fetchone()
+        except sqlite3.OperationalError as e:
+            maxMem, avgMem = None, None
 
+        try:
+            stateC = self.conn().execute("SELECT max(NumStates), avg(NumStates) from stats")
+            maxStates, avgStates = stateC.fetchone()
+        except sqlite3.OperationalError as e:
+            maxStates, avgStates = None, None
 
-def getMatchedRecordIndex(records, column, target):
-    """Find target from the specified column in records."""
-    target = int(target)
-    lo = 0
-    hi = len(records) - 1
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if column(records[mid]) <= target:
-            lo = mid + 1
-        else:
-            hi = mid
-    return lo
+        return {"MaxMem":maxMem, "AvgMem": avgMem, "MaxStates": maxStates, "AvgStates": avgStates}
 
-
-def aggregateRecords(records):
-    # index for memUsage and stateCount in run.stats
-    memIndex = 6
-    stateIndex = 5
-
-    # maximum and average memory usage
-    memValues = list(map(itemgetter(memIndex), records))
-    maxMem = max(memValues) / 1024 / 1024
-    avgMem = sum(memValues) / len(memValues) / 1024 / 1024
-
-    # maximum and average number of states
-    stateValues = list(map(itemgetter(stateIndex), records))
-    maxStates = max(stateValues)
-    avgStates = sum(stateValues) / len(stateValues)
-
-    return (maxMem, avgMem, maxStates, avgStates)
+    def getLastRecord(self):
+        try:
+            cursor = self.conn().execute("SELECT * FROM stats ORDER BY rowid DESC LIMIT 1")
+            column_names = [description[0] for description in cursor.description]
+            return dict(zip(column_names, cursor.fetchone()))
+        except (sqlite3.OperationalError, TypeError) as e:
+            return None
 
 
 def stripCommonPathPrefix(paths):
@@ -121,181 +143,377 @@ def stripCommonPathPrefix(paths):
     return ['/'.join(p[i:]) for p in paths]
 
 
-def getKeyIndex(key, labels):
-    """Get the index of the specified key in labels."""
-    def normalizeKey(key):
-        return re.split('\W', key)[0]
-
-    for i, title in enumerate(labels):
-        if normalizeKey(title) == normalizeKey(key):
-            return i
-    else:
-        raise ValueError('invalid key: {0}'.format(key))
-
+def isValidKleeOutDir(dir):
+    return os.path.exists(os.path.join(dir, 'info')) and os.path.exists(os.path.join(dir, 'run.stats'))
 
 def getKleeOutDirs(dirs):
     kleeOutDirs = []
     for dir in dirs:
-        if os.path.exists(os.path.join(dir, 'info')):
+        if isValidKleeOutDir(dir):
             kleeOutDirs.append(dir)
         else:
             for root, subdirs, _ in os.walk(dir):
                 for d in subdirs:
                     path = os.path.join(root, d)
-                    if os.path.exists(os.path.join(path, 'info')):
+                    if isValidKleeOutDir(path):
                         kleeOutDirs.append(path)
     return kleeOutDirs
 
 
-def getLabels(pr):
+def select_columns(record, pr):
     if pr == 'all':
-        labels = ('Path', 'Instrs', 'Time(s)', 'ICov(%)', 'BCov(%)', 'ICount',
-                  'TSolver(%)', 'States', 'maxStates', 'avgStates', 'Mem(MB)',
-                  'maxMem(MB)', 'avgMem(MB)', 'Queries', 'AvgQC', 'Tcex(%)',
-                  'Tfork(%)', 'TResolve(%)', 'QCexCMisses', 'QCexCHits')
-    elif pr == 'reltime':
-        labels = ('Path', 'Time(s)', 'TUser(%)', 'TSolver(%)',
-                  'Tcex(%)', 'Tfork(%)', 'TResolve(%)')
+        return record
+
+    if pr == 'reltime':
+        s_column = ['Path', 'WallTime', 'RelUserTime', 'RelSolverTime',
+                  'RelCexCacheTime', 'RelForkTime', 'RelResolveTime']
     elif pr == 'abstime':
-        labels = ('Path', 'Time(s)', 'TUser(s)', 'TSolver(s)',
-                  'Tcex(s)', 'Tfork(s)', 'TResolve(s)')
+        s_column = ['Path', 'WallTime', 'UserTime', 'SolverTime',
+                  'CexCacheTime', 'ForkTime', 'ResolveTime']
     elif pr == 'more':
-        labels = ('Path', 'Instrs', 'Time(s)', 'ICov(%)', 'BCov(%)', 'ICount',
-                  'TSolver(%)', 'States', 'maxStates', 'Mem(MB)', 'maxMem(MB)')
+        s_column = ['Path', 'Instructions', 'WallTime', 'ICov', 'BCov', 'ICount',
+                  'RelSolverTime', 'NumStates', 'MaxStates', 'MallocUsage', 'MaxMem']
     else:
-        labels = ('Path', 'Instrs', 'Time(s)', 'ICov(%)',
-                  'BCov(%)', 'ICount', 'TSolver(%)')
-    return labels
+        s_column = ['Path', 'Instructions', 'WallTime', 'ICov',
+                  'BCov', 'ICount', 'RelSolverTime']
+
+    # filter record
+    return { column:record[column] for column in s_column if column in record }
 
 
-def getRow(record, stats, pr):
-    """Compose data for the current run into a row."""
-    I, BFull, BPart, BTot, T, St, Mem, QTot, QCon,\
-        _, Treal, SCov, SUnc, _, Ts, Tcex, Tf, Tr, QCexMiss, QCexHits = record
-    maxMem, avgMem, maxStates, avgStates = stats
+def add_artificial_columns(record):
+    # Convert recorded times from microseconds to seconds
+    for key in ["UserTime", "WallTime", "QueryTime", "SolverTime", "CexCacheTime", "ForkTime", "ResolveTime"]:
+        if not key in record:
+            continue
+        record[key] /= 1000000
 
-    # special case for straight-line code: report 100% branch coverage
-    if BTot == 0:
-        BFull = BTot = 1
+    # Convert memory from byte to MiB
+    if "MallocUsage" in record:
+        record["MallocUsage"] /= 1024 * 1024
 
-    Mem = Mem / 1024 / 1024
-    AvgQC = int(QCon / max(1, QTot))
+    # Calculate avg. query construct
+    if "NumQueryConstructs" in record and "NumQueries" in record:
+        record["AvgQC"] = int(record["NumQueryConstructs"] / max(1, record["NumQueries"]))
 
-    if pr == 'all':
-        row = (I, Treal, 100 * SCov / (SCov + SUnc),
-               100 * (2 * BFull + BPart) / (2 * BTot), SCov + SUnc,
-               100 * Ts / Treal, St, maxStates, avgStates,
-               Mem, maxMem, avgMem, QTot, AvgQC, 100 * Tcex / Treal,
-               100 * Tf / Treal, 100 * Tr / Treal, QCexMiss, QCexHits)
-    elif pr == 'reltime':
-        row = (Treal, 100 * T / Treal, 100 * Ts / Treal,
-               100 * Tcex / Treal, 100 * Tf / Treal,
-               100 * Tr / Treal)
-    elif pr == 'abstime':
-        row = (Treal, T, Ts, Tcex, Tf, Tr)
-    elif pr == 'more':
-        row = (I, Treal, 100 * SCov / (SCov + SUnc),
-               100 * (2 * BFull + BPart) / (2 * BTot),
-               SCov + SUnc, 100 * Ts / Treal,
-               St, maxStates, Mem, maxMem)
-    else:
-        row = (I, Treal, 100 * SCov / (SCov + SUnc),
-               100 * (2 * BFull + BPart) / (2 * BTot),
-               SCov + SUnc, 100 * Ts / Treal)
+    # Calculate total number of instructions
+    if "CoveredInstructions" in record and "UncoveredInstructions" in record:
+        record["ICount"] = (record["CoveredInstructions"] + record["UncoveredInstructions"])
+
+    # Calculate relative instruction coverage
+    if "CoveredInstructions" in record and "ICount" in record:
+        record["ICov"] = 100 * record["CoveredInstructions"] / record["ICount"]
+
+    # Calculate branch coverage
+    if "FullBranches" in record and "PartialBranches" in record and "NumBranches" in record:
+        record["BCov"] = 100.0
+        if record["NumBranches"] != 0:
+            record["BCov"] *= (2 * record["FullBranches"] + record["PartialBranches"]) / (2 * record["NumBranches"])
+
+    # Add relative times
+    for key in ["SolverTime", "CexCacheTime", "ForkTime", "ResolveTime", "UserTime"]:
+        if "WallTime" in record and key in record:
+            record["Rel"+key] = 100 * record[key] / record["WallTime"]
+
+    return record
+
+
+def grafana(dirs, host_address, port):
+    dr = getLogFile(dirs[0])
+    from flask import Flask, jsonify, request
+    import datetime
+    app = Flask(__name__)
+
+    import re
+    from dateutil import parser
+    def getKleeStartTime():
+        with open(getInfoFile(dirs[0]), "r") as file:
+            for line in file:
+                m = re.match("Started: (.*)", line)
+                if m:
+                    dateString = m.group(1)
+                    return parser.parse(dateString).timestamp()
+
+        print("Error: Couldn't find klee's start time", file=sys.stderr)
+        sys.exit()
+
+    def toEpoch(date_text):
+        dt = datetime.datetime.strptime(date_text, "%Y-%m-%dT%H:%M:%S.%fZ")
+        epoch = (dt - datetime.datetime(1970, 1, 1)).total_seconds()
+        return epoch
+
+    @app.route('/')
+    def status():
+        return 'OK'
+
+    @app.route('/search', methods=['GET', 'POST'])
+    def search():
+        conn = sqlite3.connect(dr)
+        cursor = conn.execute('SELECT * FROM stats LIMIT 1')
+        names = [description[0] for description in cursor.description]
+        return jsonify(names)
+
+    @app.route('/query', methods=['POST'])
+    def query():
+        jsn = request.get_json()
+        interval = jsn["intervalMs"]
+        limit = jsn["maxDataPoints"]
+        frm = toEpoch(jsn["range"]["from"])
+        to = toEpoch(jsn["range"]["to"])
+        targets = [str(t["target"]) for t in jsn["targets"]]
+        startTime = getKleeStartTime()
+        fromTime = frm - startTime if frm - startTime > 0 else 0
+        toTime = to - startTime if to - startTime > fromTime else fromTime + 100
+        #convert to microseconds
+        startTime, fromTime, toTime = startTime*1000000, fromTime*1000000, toTime*1000000
+        sqlTarget = ",".join(["AVG( {0} )".format(t) for t in targets if t.isalnum()])
+
+        conn = sqlite3.connect(dr)
+        s = "SELECT WallTime + ? , {fields} " \
+            + " FROM stats" \
+            + " WHERE WallTime >= ? AND WallTime <= ?" \
+            + " GROUP BY WallTime/? LIMIT ?"
+        s = s.format(fields=sqlTarget) #can't use prepared staments for this one
+
+        #All times need to be in microseconds, interval is in milliseconds
+        cursor = conn.execute(s, ( startTime, fromTime, toTime, interval*1000, limit))
+        result = [ {"target": t, "datapoints": []} for t in targets ]
+        for line in cursor:
+            unixtimestamp = int(line[0]) / 1000 #Convert from microsecond to miliseconds
+            for field, datastream in zip(line[1:], result):
+                  if "Time" in datastream["target"] and "Wall" not in datastream["target"]\
+                     and "User" not in datastream["target"]:
+                    val = (field/(line[0]-startTime))*100
+                    datastream["datapoints"].append([val, unixtimestamp])
+                  else:
+                    datastream["datapoints"].append([field, unixtimestamp])
+
+        ret = jsonify(result)
+        return ret
+
+    app.run(host=host_address, port=port)
+    return 0
+
+
+def write_csv(data):
+    import csv
+    data = data[0]
+    c = data.conn().cursor()
+    sql3_cursor = c.execute("SELECT * FROM stats")
+    csv_out = csv.writer(sys.stdout)
+    # write header
+    csv_out.writerow([d[0] for d in sql3_cursor.description])
+    # write data
+    for result in sql3_cursor:
+        csv_out.writerow(result)
+
+
+def rename_columns(row, name_mapping):
+    """
+    Renames the columns in a row based on the mapping.
+    If a column name is not found in the mapping, keep the old name
+    :param row:
+    :param name_mapping:
+    :return: updated row
+    """
+    keys = list(row.keys())
+    for k in keys:
+        new_key = name_mapping.get(k, k)
+        if new_key == k:
+            continue
+        row[new_key] = row.pop(k)
     return row
 
 
-def drawLineChart(vectors, titles):
-    """Draw a line chart based on data from vectors.
+def write_table(args, data, dirs, pr):
+    from tabulate import TableFormat, Line, DataRow, tabulate
 
-    Args:
-        vectors: A list of vectors. Each vector is drawn in a separate
-                 subchart.
-        titles: A list of strings. Each string is an explanation of the
-                corresponding vector.
-    """
-    try:
-        import matplotlib
-        matplotlib.use('Agg')  # plot without X-server connection
-        import matplotlib.pyplot as plt
-    except:
-        print('Error: Package "matplotlib" required for figure plotting. '
-              'Please install it using "pip" or your package manager.',
-              file=sys.stderr)
-        exit(1)
-    from math import sqrt, ceil
+    KleeTable = TableFormat(lineabove=Line("-", "-", "-", "-"),
+                            linebelowheader=Line("-", "-", "-", "-"),
+                            linebetweenrows=None,
+                            linebelow=Line("-", "-", "-", "-"),
+                            headerrow=DataRow("|", "|", "|"),
+                            datarow=DataRow("|", "|", "|"),
+                            padding=0,
+                            with_header_hide=None)
 
-    nFigs = len(vectors)       # number of subfigures
-    nRow = int(sqrt(nFigs))    # number of rows in the figure
-    nCol = ceil(nFigs / nRow)  # number of columns in the figure
+    if len(data) > 1:
+        dirs = stripCommonPathPrefix(dirs)
+    # attach the stripped path
+    data = list(zip(dirs, data))
 
-    fig = plt.figure()
-    for i in range(nFigs):
-        ax = fig.add_subplot(nRow, nCol, i+1)
-        ax.plot(vectors[i])
-        ax.set_title(titles[i])
-        #ax.set_xlabel()
-        #ax.set_ylabel()
+    # build the main body of the table
+    table = dict()
+    for i, (path, records) in enumerate(data):
+        stats = records.aggregateRecords()
+        # Get raw row
+        single_row = records.getLastRecord()
+        if single_row is None:
+            # empty or corrupt SQLite database
+            single_row = {}
+        single_row['Path'] = path
+        single_row.update(stats)
 
-    #fig.show()
-    #raw_input('Press any key to continue..')
+        # Extend row with additional entries
+        single_row = add_artificial_columns(single_row)
+        single_row = select_columns(single_row, pr)
 
-    def getFileName():
-        """Get a unused file name in current directory."""
-        i = 0
-        fileName = 'fig-klee-stats-{0}.png'.format(i)
-        while os.path.exists(fileName):
-            i = i + 1
-            fileName = 'fig-klee-stats-{0}.png'.format(i)
-        return fileName
+        for key in set.union(set(single_row.keys()), set(table.keys())):
+            # Not all columns in row: add "None"
+            if key not in single_row:
+                table[key].append(None)
+                continue
 
-    plt.savefig(getFileName(),
-                dpi=150,  # dots-per-inch, default: 100
-                bbox_inches='tight',  # tighter bbox
-                transparent=False)
+            # New column: extend if necessary for previous rows
+            if key not in table:
+                table[key] = [None] * i
+
+            # add the value
+            table[key].append(single_row[key])
+
+    # Rename columns
+    name_mapping = dict()
+    for entry in Legend:
+        name_mapping[entry[2]] = entry[0]
+    table = rename_columns(table, name_mapping)
+
+    # Apply column filter provided by user
+    user_columns = []
+    if args.columns is not None:
+        user_columns = [c for c in map(lambda v: v.strip(), args.columns.split(',')) if c]
+        column_names = list(table.keys())
+        # error when user-provided column does not exist
+        diff = set(user_columns) - set(column_names)
+        if diff:
+            print('Column(s) not found:', ', '.join(diff), file=sys.stderr)
+            sys.exit(1)
+        # error when no name given
+        if not user_columns:
+            print('No column name specified for --print-columns.', file=sys.stderr)
+            sys.exit(1)
+        # filter
+        for k in column_names:
+            if k not in user_columns:
+                table.pop(k)
+
+    # Add a summary row
+    max_len = len(data)
+    if max_len > 1 and args.tableFormat not in ['csv', 'readable-csv']:
+        # calculate the total
+        for k in table:
+            if k == "Path": # Skip path
+                continue
+            # TODO: this is a bit bad but ... . In a nutshell, if the name of a column starts or ends with certain
+            #  pattern change the summary function.
+            if k.startswith("Avg") or k.endswith("(%)"):
+                total = sum([e for e in table[k] if e is not None])/max_len
+            elif k.startswith("Max"):
+                total = max([e for e in table[k] if e is not None])
+            else:
+                total = sum([e for e in table[k] if e is not None])
+            table[k].append(total)
+
+        table['Path'].append('Total ({0})'.format(max_len))
+
+    # Prepare the order of the header: start to order entries according to the order in legend and add the unknown entries at the end
+    headers = user_columns
+    if not headers:
+        headers = ["Path"]
+        available_headers = list(table.keys())
+        for entry in Legend:
+            l_name = entry[0]
+            if l_name in available_headers:
+                headers.append(l_name)
+                available_headers.remove(l_name)
+        available_headers.sort()
+        headers += available_headers
+
+    # Make sure we keep the correct order of the column entries
+    final_table = collections.OrderedDict()
+    for column in headers:
+        final_table[column] = table[column]
+    table = final_table
+
+    # Output table
+    # - KLEE standard format
+    if args.tableFormat == 'klee':
+        stream = tabulate(
+            table, headers='keys',
+            tablefmt=KleeTable,
+            floatfmt='.{p}f'.format(p=2),
+            numalign='right', stralign='center')
+        # add a line separator before the total line
+        if len(data) > 1:
+            stream = stream.splitlines()
+            stream.insert(-2, stream[-1])
+            stream = '\n'.join(stream)
+        print(stream)
+    # - (readable) csv
+    elif args.tableFormat in ['csv', 'readable-csv']:
+        CsvTable = TableFormat(
+            lineabove = None, linebelowheader = None,
+            linebetweenrows = None, linebelow = None,
+            headerrow = DataRow('', ',', ''),
+            datarow = DataRow('', ',', ''),
+            padding = 0, with_header_hide = None)
+        print(tabulate(
+            table, headers='keys',
+            tablefmt=CsvTable,
+            floatfmt='.{p}f'.format(p=2),
+            numalign='decimal' if args.tableFormat == 'readable-csv' else None,
+            stralign='left' if args.tableFormat == 'readable-csv' else None))
+    # - user-defined
+    else:
+        print(tabulate(
+            table, headers='keys',
+            tablefmt=args.tableFormat,
+            floatfmt='.{p}f'.format(p=2),
+            numalign='right', stralign='center'))
 
 
 def main():
-    # function for sanitizing arguments
-    def isPositiveInt(value):
-        try:
-            value = int(value)
-        except ValueError:
-            raise argparse.ArgumentTypeError(
-                'integer expected: {0}'.format(value))
-        if value <= 0:
-            raise argparse.ArgumentTypeError(
-                'positive integer expected: {0}'.format(value))
-        return value
+    tabulate_available = False
+    epilog = ""
+
+    try:
+        from tabulate import tabulate, _table_formats
+        epilog = 'LEGEND\n' + tabulate([(f[:2]) for f in Legend])
+
+        tabulate_available = True
+    except:
+        pass
 
     parser = argparse.ArgumentParser(
         description='output statistics logged by klee',
-        epilog='LEGEND\n' + tabulate(Legend),
+        epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter)
 
-    parser.add_argument('dir', nargs='+', help='klee output directory')
+    parser.add_argument('dir', nargs='+', help='KLEE output directory')
 
-    parser.add_argument('--precision',
-                        dest='precision', type=isPositiveInt,
-                        default=2, metavar='n',
-                        help='Floating point numbers display precision '
-                        '(default: 2).')
+    if tabulate_available:
+        tf_choices = ['klee', 'csv', 'readable-csv'] + list(_table_formats.keys())
+        tf_help = 'Table format for the summary.'
+        tf_default = 'klee'
+    else:
+        tf_choices = []
+        tf_help = '(not available due to missing "tabulate" package)'
+        tf_default = None
     parser.add_argument('--table-format',
-                        choices=['plain', 'simple', 'grid', 'pipe', 'orgtbl',
-                                 'rst', 'mediawiki', 'latex', 'klee'],
-                        dest='tableFormat', default='klee',
-                        help='Table format for the summary.')
-    parser.add_argument('--draw-line-chart',
-                        dest='drawLineChart', metavar='header-list',
-                        help='Draw line chart for a list of columns. '
-                        'Columns must be chosen from the headers of the '
-                        'table outputted and separated by comma (e.g., '
-                        '--draw-line-chart=Instrs,Time). Data points '
-                        'on x-axis correspond to lines in run.stats.')
-    parser.add_argument('--sample-interval', dest='sampleInterv',
-                        type=isPositiveInt, default='10', metavar='n',
-                        help='Sample a data point every n lines for a '
-                        'run.stats (default: 10)')
+                        choices=tf_choices, dest='tableFormat', default=tf_default,
+                        help=tf_help)
+
+    parser.add_argument('--to-csv',
+                        action='store_true', dest='toCsv',
+                        help='Output run.stats data as comma-separated values (CSV)')
+    parser.add_argument('--grafana',
+                        action='store_true', dest='grafana',
+                        help='Start a grafana web server')
+    parser.add_argument('--grafana-host', dest='grafana_host',
+                        help='IP address grafana web server should listen to',
+                        default="127.0.0.1")
+    parser.add_argument('--grafana-port', dest='grafana_port', type=int,
+                        help='Port grafana web server should listen to',
+                        default=5000)
 
     # argument group for controlling output verboseness
     pControl = parser.add_mutually_exclusive_group(required=False)
@@ -315,37 +533,22 @@ def main():
                           action='store_true', dest='pMore',
                           help='Print extra information (needed when '
                           'monitoring an ongoing run).')
-
-    # arguments for sorting
-    parser.add_argument('--sort-by', dest='sortBy', metavar='header',
-                        help='Key value to sort by. Must be chosen from '
-                        'the headers of the table outputted  (e.g., '
-                        '--sort-by=Instrs).')
-    parser.add_argument('--ascending',
-                        dest='ascending', action='store_true',
-                        help='Sort in ascending order (default: False).')
-
-    # arguments for comparing
-    parser.add_argument('--compare-by', dest='compBy', metavar='header',
-                        help='Key value on which to compare runs to the '
-                        'reference one (which is the first one). Must be '
-                        'chosen from the headers of the table oputputted. '
-                        'e.g., --compare-by=Instrs shows how each run '
-                        'compares to the reference run after executing the '
-                        'same number of instructions as the reference run. '
-                        "If a run hasn't executed as many instructions as "
-                        'the reference one, we simply print the statistics '
-                        'at the end of that run.')
-    parser.add_argument('--compare-at', dest='compAt', metavar='value',
-                        help='Value to compare the runs at. Can be special '
-                        "value 'last' to compare at the last point which "
-                        'makes sense. Use in conjunction with --compare-by.')
+    pControl.add_argument('--print-columns', type=str, dest='columns', default=None,
+                          help='Comma-separated list of table columns, e.g \'Path,Time(s),ICov(%%)\'.')
 
     args = parser.parse_args()
 
+
+    if not tabulate_available and not (args.grafana or args.toCsv):
+        print('Error: Package "tabulate" required for table formatting. '
+              'Please install it using "pip" or your package manager. '
+              'You can still use --grafana and --to-csv without tabulate.',
+              file=sys.stderr)
+        sys.exit(1)
+
     # get print controls
     pr = 'NONE'
-    if args.pAll:
+    if args.pAll or args.columns:
         pr = 'all'
     elif args.pRelTimes:
         pr = 'reltime'
@@ -356,114 +559,27 @@ def main():
 
     dirs = getKleeOutDirs(args.dir)
     if len(dirs) == 0:
-        print('no klee output dir found', file=sys.stderr)
-        exit(1)
+        print('No KLEE output directory found', file=sys.stderr)
+        sys.exit(1)
+
+    if args.grafana:
+        return grafana(dirs, args.grafana_host, args.grafana_port)
+
+    # Filter non-existing files, useful for star operations
+    valid_log_files = [getLogFile(f) for f in dirs if os.path.isfile(getLogFile(f))]
+
     # read contents from every run.stats file into LazyEvalList
-    data = [LazyEvalList(list(open(getLogFile(d)))) for d in dirs]
-    if len(data) > 1:
-        dirs = stripCommonPathPrefix(dirs)
-    # attach the stripped path
-    data = list(zip(dirs, data))
+    data = [LazyEvalList(d) for d in valid_log_files]
 
-    labels = getLabels(pr)
-    # labels in the same order as in the run.stats file. used by --compare-by.
-    # current impl needs monotonic values, so only keep the ones making sense.
-    rawLabels = ('Instrs', '', '', '', '', '', '', 'Queries',
-                 '', '', 'Time', 'ICov', '', '', '', '', '', '')
+    if args.toCsv:
+        if len(valid_log_files) > 1:
+            print('Error: --to-csv only supports a single input directory ', file=sys.stderr)
+            sys.exit(1)
 
-    if args.compBy:
-        # index in the record of run.stats
-        compIndex = getKeyIndex(args.compBy, rawLabels)
-        if args.compAt:
-            if args.compAt == 'last':
-                # [records][last-record][compare-by-index]
-                refValue = min(map(lambda r: r[1][-1][compIndex], data))
-            else:
-                refValue = args.compAt
-        else:
-            refValue = data[0][1][-1][compIndex]
+        write_csv(data)
+        return
 
-    # build the main body of the table
-    table = []
-    totRecords = []  # accumulated records
-    totStats = []    # accumulated stats
-    for path, records in data:
-        row = [path]
-        if args.compBy:
-            matchIndex = getMatchedRecordIndex(
-                records, itemgetter(compIndex), refValue)
-            stats = aggregateRecords(LazyEvalList(records[:matchIndex + 1]))
-            totStats.append(stats)
-            row.extend(getRow(records[matchIndex], stats, pr))
-            totRecords.append(records[matchIndex])
-        else:
-            stats = aggregateRecords(records)
-            totStats.append(stats)
-            row.extend(getRow(records[-1], stats, pr))
-            totRecords.append(records[-1])
-        table.append(row)
-    # calculate the total
-    totRecords = [sum(e) for e in zip(*totRecords)]
-    totStats = [sum(e) for e in zip(*totStats)]
-    totalRow = ['Total ({0})'.format(len(table))]
-    totalRow.extend(getRow(totRecords, totStats, pr))
-
-    if args.sortBy:
-        table = sorted(table, key=itemgetter(getKeyIndex(args.sortBy, labels)),
-                       reverse=(not args.ascending))
-
-    if len(data) > 1:
-        table.append(totalRow)
-    table.insert(0, labels)
-
-    if args.tableFormat != 'klee':
-        print(tabulate(
-            table, headers='firstrow',
-            tablefmt=args.tableFormat,
-            floatfmt='.{p}f'.format(p=args.precision),
-            numalign='right', stralign='center'))
-    else:
-        stream = tabulate(
-            table, headers='firstrow',
-            tablefmt=KleeTable,
-            floatfmt='.{p}f'.format(p=args.precision),
-            numalign='right', stralign='center')
-        # add a line separator before the total line
-        if len(data) > 1:
-            stream = stream.splitlines()
-            stream.insert(-2, stream[-1])
-            stream = '\n'.join(stream)
-        print(stream)
-
-    if args.drawLineChart:
-        if len(dirs) != 1:
-            print('--draw-line-chart only supports using a single file',
-                  file=sys.stderr)
-            exit(1)
-
-        # sample according to the given interval
-        samples = [r for i, r in enumerate(data[0][1])
-                   if i % args.sampleInterv == 0]
-        vectors = []
-        for i in range(len(samples)):
-            # aggregate all the samples upto the i-th one
-            stats = aggregateRecords(samples[:i + 1])
-            vectors.append(getRow(samples[i], stats, pr))
-
-        titles = args.drawLineChart.split(',')
-        # Index returned by getKeyIndex() against labels is starting from
-        # 'Path' column.  vectors here doesn't have the 'Path' column.
-        indices = [getKeyIndex(e, labels) - 1 for e in titles]
-        # get one more column to make sure itemgetter always return tuples
-        indices.append(0)
-        # strip columns not specified by the user
-        vectors = map(itemgetter(*indices), vectors)
-        # combine elements in the same column into the same tuple
-        vectors = list(zip(*vectors))
-        # remove the column we get but not needed
-        vectors = vectors[:-1]
-
-        drawLineChart(vectors, titles)
+    write_table(args, data, dirs, pr)
 
 
 if __name__ == '__main__':

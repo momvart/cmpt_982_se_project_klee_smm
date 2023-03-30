@@ -7,9 +7,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "klee/Solver.h"
-#include "klee/SolverImpl.h"
-#include "klee/Constraints.h"
+#include "klee/Solver/Solver.h"
+
+#include "klee/Expr/Constraints.h"
+#include "klee/Solver/SolverImpl.h"
 
 using namespace klee;
 
@@ -100,7 +101,7 @@ Solver::getInitialValues(const Query& query,
   bool hasSolution;
   bool success =
     impl->computeInitialValues(query, objects, values, hasSolution);
-  // FIXME: Propogate this out.
+  // FIXME: Propagate this out.
   if (!hasSolution)
     return false;
     
@@ -222,10 +223,9 @@ std::pair< ref<Expr>, ref<Expr> > Solver::getRange(const Query& query) {
 
 void Query::dump() const {
   llvm::errs() << "Constraints [\n";
-  for (ConstraintManager::const_iterator i = constraints.begin();
-      i != constraints.end(); i++) {
-    (*i)->dump();
-  }
+  for (const auto &constraint : constraints)
+    constraint->dump();
+
   llvm::errs() << "]\n";
   llvm::errs() << "Query [\n";
   expr->dump();

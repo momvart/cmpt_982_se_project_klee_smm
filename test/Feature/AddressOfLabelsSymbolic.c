@@ -1,8 +1,10 @@
-// RUN: %llvmgcc -emit-llvm -g -c %s -o %t.bc
+// RUN: %clang -emit-llvm -g -c %s -o %t.bc
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --output-dir=%t.klee-out %t.bc > %t.log 2> %t.stderr.log
 // RUN: FileCheck %s -check-prefix=CHECK-MSG --input-file=%t.log
 // RUN: FileCheck %s -check-prefix=CHECK-ERR --input-file=%t.stderr.log
+
+#include "klee/klee.h"
 
 #include <stdio.h>
 

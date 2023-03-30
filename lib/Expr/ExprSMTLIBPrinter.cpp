@@ -6,34 +6,36 @@
 // License. See LICENSE.TXT for details.
 //
 //===----------------------------------------------------------------------===//
-#include "llvm/Support/Casting.h"
+
+#include "klee/Expr/ExprSMTLIBPrinter.h"
+#include "klee/Support/Casting.h"
+
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "klee/util/ExprSMTLIBPrinter.h"
 
 #include <stack>
 
 namespace ExprSMTLIBOptions {
 // Command line options
 llvm::cl::opt<klee::ExprSMTLIBPrinter::ConstantDisplayMode>
-argConstantDisplayMode(
-    "smtlib-display-constants",
-    llvm::cl::desc("Sets how bitvector constants are written in generated "
-                   "SMT-LIBv2 files (default=dec)"),
-    llvm::cl::values(clEnumValN(klee::ExprSMTLIBPrinter::BINARY, "bin",
-                                "Use binary form (e.g. #b00101101)"),
-                     clEnumValN(klee::ExprSMTLIBPrinter::HEX, "hex",
-                                "Use Hexadecimal form (e.g. #x2D)"),
-                     clEnumValN(klee::ExprSMTLIBPrinter::DECIMAL, "dec",
-                                "Use decimal form (e.g. (_ bv45 8) )")
-                     KLEE_LLVM_CL_VAL_END),
-    llvm::cl::init(klee::ExprSMTLIBPrinter::DECIMAL));
+    argConstantDisplayMode(
+        "smtlib-display-constants",
+        llvm::cl::desc("Sets how bitvector constants are written in generated "
+                       "SMT-LIBv2 files (default=dec)"),
+        llvm::cl::values(clEnumValN(klee::ExprSMTLIBPrinter::BINARY, "bin",
+                                    "Use binary form (e.g. #b00101101)"),
+                         clEnumValN(klee::ExprSMTLIBPrinter::HEX, "hex",
+                                    "Use Hexadecimal form (e.g. #x2D)"),
+                         clEnumValN(klee::ExprSMTLIBPrinter::DECIMAL, "dec",
+                                    "Use decimal form (e.g. (_ bv45 8) )")),
+        llvm::cl::init(klee::ExprSMTLIBPrinter::DECIMAL),
+        llvm::cl::cat(klee::ExprCat));
 
-llvm::cl::opt<bool> humanReadableSMTLIB(
-    "smtlib-human-readable",
-    llvm::cl::desc(
-        "Enables generated SMT-LIBv2 files to be human readable (default=off)"),
-    llvm::cl::init(false));
+llvm::cl::opt<bool>
+    humanReadableSMTLIB("smtlib-human-readable",
+                        llvm::cl::desc("Enables generated SMT-LIBv2 files to "
+                                       "be human readable (default=false)"),
+                        llvm::cl::init(false), llvm::cl::cat(klee::ExprCat));
 
 llvm::cl::opt<klee::ExprSMTLIBPrinter::AbbreviationMode> abbreviationMode(
     "smtlib-abbreviation-mode",
@@ -44,10 +46,10 @@ llvm::cl::opt<klee::ExprSMTLIBPrinter::AbbreviationMode> abbreviationMode(
                      clEnumValN(klee::ExprSMTLIBPrinter::ABBR_LET, "let",
                                 "Abbreviate with let"),
                      clEnumValN(klee::ExprSMTLIBPrinter::ABBR_NAMED, "named",
-                                "Abbreviate with :named annotations")
-                     KLEE_LLVM_CL_VAL_END),
-    llvm::cl::init(klee::ExprSMTLIBPrinter::ABBR_LET));
-}
+                                "Abbreviate with :named annotations")),
+    llvm::cl::init(klee::ExprSMTLIBPrinter::ABBR_LET),
+    llvm::cl::cat(klee::ExprCat));
+} // namespace ExprSMTLIBOptions
 
 namespace klee {
 
@@ -275,7 +277,7 @@ void ExprSMTLIBPrinter::printReadExpr(const ref<ReadExpr> &e) {
   printSeperator();
 
   // print array with updates recursively
-  printUpdatesAndArray(e->updates.head, e->updates.root);
+  printUpdatesAndArray(e->updates.head.get(), e->updates.root);
 
   // print index
   printSeperator();
@@ -479,7 +481,7 @@ void ExprSMTLIBPrinter::printUpdatesAndArray(const UpdateNode *un,
     printSeperator();
 
     // recurse to get the array or update that this store operations applies to
-    printUpdatesAndArray(un->next, root);
+    printUpdatesAndArray(un->next.get(), root);
 
     printSeperator();
 
@@ -501,9 +503,8 @@ void ExprSMTLIBPrinter::printUpdatesAndArray(const UpdateNode *un,
 
 void ExprSMTLIBPrinter::scanAll() {
   // perform scan of all expressions
-  for (ConstraintManager::const_iterator i = query->constraints.begin();
-       i != query->constraints.end(); i++)
-    scan(*i);
+  for (const auto &constraint : query->constraints)
+    scan(constraint);
 
   // Scan the query too
   scan(query->expr);
@@ -625,10 +626,8 @@ void ExprSMTLIBPrinter::printHumanReadableQuery() {
 
   if (abbrMode != ABBR_LET) {
     // Generate assert statements for each constraint
-    for (ConstraintManager::const_iterator i = query->constraints.begin();
-         i != query->constraints.end(); i++) {
-      printAssert(*i);
-    }
+    for (const auto &constraint : query->constraints)
+      printAssert(constraint);
 
     *o << "; QueryExpr\n";
 
@@ -691,7 +690,7 @@ void ExprSMTLIBPrinter::printAction() {
 }
 
 void ExprSMTLIBPrinter::scan(const ref<Expr> &e) {
-  assert(!(e.isNull()) && "found NULL expression");
+  assert(e && "found NULL expression");
 
   if (isa<ConstantExpr>(e))
     return; // we don't need to scan simple constants
@@ -709,7 +708,7 @@ void ExprSMTLIBPrinter::scan(const ref<Expr> &e) {
           haveConstantArray = true;
 
         // scan the update list
-        scanUpdates(re->updates.head);
+        scanUpdates(re->updates.head.get());
       }
     }
 
@@ -820,7 +819,7 @@ void ExprSMTLIBPrinter::scanUpdates(const UpdateNode *un) {
   while (un != NULL) {
     scan(un->index);
     scan(un->value);
-    un = un->next;
+    un = un->next.get();
   }
 }
 

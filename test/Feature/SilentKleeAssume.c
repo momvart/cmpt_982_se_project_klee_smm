@@ -1,4 +1,4 @@
-// RUN: %llvmgcc -emit-llvm -g -c -o %t.bc %s
+// RUN: %clang -emit-llvm -g -c -o %t.bc %s
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --output-dir=%t.klee-out --exit-on-error --silent-klee-assume %t.bc > %t.silent-klee-assume.log 2>&1
 // RUN: FileCheck -input-file=%t.silent-klee-assume.log -check-prefix=CHECK-SILENT-KLEE-ASSUME %s
@@ -26,5 +26,6 @@ int main() {
 
 // CHECK-SILENT-KLEE-ASSUME: KLEE: output directory is "{{.+}}"
 // CHECK-SILENT-KLEE-ASSUME: KLEE: done: total instructions = {{[0-9]+}}
-// CHECK-SILENT-KLEE-ASSUME: KLEE: done: completed paths = 2
+// CHECK-SILENT-KLEE-ASSUME: KLEE: done: completed paths = 1
+// CHECK-SILENT-KLEE-ASSUME: KLEE: done: partially completed paths = 1
 // CHECK-SILENT-KLEE-ASSUME: KLEE: done: generated tests = 1

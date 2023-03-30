@@ -1,4 +1,4 @@
-// RUN: %llvmgcc %s -emit-llvm -g %O0opt -c -o %t.bc
+// RUN: %clang %s -emit-llvm -g %O0opt -c -o %t.bc
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --output-dir=%t.klee-out %t.bc
 
@@ -29,11 +29,11 @@ int main(int argc, char** argv) {
     if (y == 0) {
       klee_assume(x == 0);
       x++;
-      // It's fine if the prefered value cannot be used
+      // It's fine if the preferred value cannot be used
       // CHECK_3: x=1, y=0
     } else {
       printf("x is allowed to be 33\n");
-      // The prefered value should be used if it can be
+      // The preferred value should be used if it can be
       // CHECK_2: x=33
     }
   } else {

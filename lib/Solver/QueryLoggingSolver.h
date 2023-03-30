@@ -11,9 +11,9 @@
 #ifndef KLEE_QUERYLOGGINGSOLVER_H
 #define KLEE_QUERYLOGGINGSOLVER_H
 
-#include "klee/Solver.h"
-#include "klee/SolverImpl.h"
-#include "klee/Internal/System/Time.h"
+#include "klee/Solver/Solver.h"
+#include "klee/Solver/SolverImpl.h"
+#include "klee/System/Time.h"
 
 #include "llvm/Support/raw_ostream.h"
 

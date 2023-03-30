@@ -8,31 +8,24 @@
 //===----------------------------------------------------------------------===//
 
 #include "ExternalDispatcher.h"
+
+#include "CoreStats.h"
 #include "klee/Config/Version.h"
+#include "klee/Module/KCallable.h"
+#include "klee/Module/KModule.h"
 
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
-#include "llvm/ExecutionEngine/MCJIT.h"
-#else
-#include "llvm/ExecutionEngine/JIT.h"
-#endif
-
 #include "llvm/ExecutionEngine/GenericValue.h"
+#include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/raw_ostream.h"
-
 #include "llvm/Support/TargetSelect.h"
-
-#if LLVM_VERSION_CODE < LLVM_VERSION(3, 5)
-#include "llvm/Support/CallSite.h"
-#else
-#include "llvm/IR/CallSite.h"
-#endif
 
 #include <csetjmp>
 #include <csignal>
@@ -57,7 +50,7 @@ class ExternalDispatcherImpl {
 private:
   typedef std::map<const llvm::Instruction *, llvm::Function *> dispatchers_ty;
   dispatchers_ty dispatchers;
-  llvm::Function *createDispatcher(llvm::Function *f, llvm::Instruction *i,
+  llvm::Function *createDispatcher(KCallable *target, llvm::Instruction *i,
                                    llvm::Module *module);
   llvm::ExecutionEngine *executionEngine;
   LLVMContext &ctx;
@@ -71,7 +64,7 @@ private:
 public:
   ExternalDispatcherImpl(llvm::LLVMContext &ctx);
   ~ExternalDispatcherImpl();
-  bool executeCall(llvm::Function *function, llvm::Instruction *i,
+  bool executeCall(KCallable *callable, llvm::Instruction *i,
                    uint64_t *args);
   void *resolveSymbol(const std::string &name);
   int getLastErrno();
@@ -122,11 +115,6 @@ ExternalDispatcherImpl::ExternalDispatcherImpl(LLVMContext &ctx)
     : ctx(ctx), lastErrno(0) {
   std::string error;
   singleDispatchModule = new Module(getFreshModuleID(), ctx);
-#if LLVM_VERSION_CODE < LLVM_VERSION(3, 6)
-  // Use old JIT
-  executionEngine = ExecutionEngine::createJIT(singleDispatchModule, &error);
-#else
-  // Use MCJIT.
   // The MCJIT JITs whole modules at a time rather than individual functions
   // so we will let it manage the modules.
   // Note that we don't do anything with `singleDispatchModule`. This is just
@@ -136,7 +124,6 @@ ExternalDispatcherImpl::ExternalDispatcherImpl(LLVMContext &ctx)
                         .setErrorStr(&error)
                         .setEngineKind(EngineKind::JIT)
                         .create();
-#endif
 
   if (!executionEngine) {
     llvm::errs() << "unable to make jit: " << error << "\n";
@@ -146,10 +133,8 @@ ExternalDispatcherImpl::ExternalDispatcherImpl(LLVMContext &ctx)
   // If we have a native target, initialize it to ensure it is linked in and
   // usable by the JIT.
   llvm::InitializeNativeTarget();
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
   llvm::InitializeNativeTargetAsmParser();
   llvm::InitializeNativeTargetAsmPrinter();
-#endif
 
   // from ExecutionEngine::create
   if (executionEngine) {
@@ -173,8 +158,9 @@ ExternalDispatcherImpl::~ExternalDispatcherImpl() {
   // we don't need to delete any of them.
 }
 
-bool ExternalDispatcherImpl::executeCall(Function *f, Instruction *i,
+bool ExternalDispatcherImpl::executeCall(KCallable *callable, Instruction *i,
                                          uint64_t *args) {
+  ++stats::externalCalls;
   dispatchers_ty::iterator it = dispatchers.find(i);
   if (it != dispatchers.end()) {
     // Code already JIT'ed for this
@@ -197,21 +183,16 @@ bool ExternalDispatcherImpl::executeCall(Function *f, Instruction *i,
 #endif
 
   Module *dispatchModule = NULL;
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
   // The MCJIT generates whole modules at a time so for every call that we
   // haven't made before we need to create a new Module.
   dispatchModule = new Module(getFreshModuleID(), ctx);
-#else
-  dispatchModule = this->singleDispatchModule;
-#endif
-  dispatcher = createDispatcher(f, i, dispatchModule);
+  dispatcher = createDispatcher(callable, i, dispatchModule);
   dispatchers.insert(std::make_pair(i, dispatcher));
 
-// Force the JIT execution engine to go ahead and build the function. This
-// ensures that any errors or assertions in the compilation process will
-// trigger crashes instead of being caught as aborts in the external
-// function.
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
+  // Force the JIT execution engine to go ahead and build the function. This
+  // ensures that any errors or assertions in the compilation process will
+  // trigger crashes instead of being caught as aborts in the external
+  // function.
   if (dispatcher) {
     // The dispatchModule is now ready so tell MCJIT to generate the code for
     // it.
@@ -220,7 +201,7 @@ bool ExternalDispatcherImpl::executeCall(Function *f, Instruction *i,
         std::move(dispatchModuleUniq)); // MCJIT takes ownership
     // Force code generation
     uint64_t fnAddr =
-        executionEngine->getFunctionAddress(dispatcher->getName());
+        executionEngine->getFunctionAddress(dispatcher->getName().str());
     executionEngine->finalizeObject();
     assert(fnAddr && "failed to get function address");
     (void)fnAddr;
@@ -228,12 +209,6 @@ bool ExternalDispatcherImpl::executeCall(Function *f, Instruction *i,
     // MCJIT didn't take ownership of the module so delete it.
     delete dispatchModule;
   }
-#else
-  if (dispatcher) {
-    // Old JIT works on a function at a time so compile the function.
-    executionEngine->recompileAndRelinkFunction(dispatcher);
-  }
-#endif
   return runProtectedCall(dispatcher, args);
 }
 
@@ -280,20 +255,14 @@ bool ExternalDispatcherImpl::runProtectedCall(Function *f, uint64_t *args) {
 // the special cases that the JIT knows how to directly call. If this is not
 // done, then the jit will end up generating a nullary stub just to call our
 // stub, for every single function call.
-Function *ExternalDispatcherImpl::createDispatcher(Function *target,
+Function *ExternalDispatcherImpl::createDispatcher(KCallable *target,
                                                    Instruction *inst,
                                                    Module *module) {
-  if (!resolveSymbol(target->getName()))
+  if (isa<KFunction>(target) && !resolveSymbol(target->getName().str()))
     return 0;
 
-  CallSite cs;
-  if (inst->getOpcode() == Instruction::Call) {
-    cs = CallSite(cast<CallInst>(inst));
-  } else {
-    cs = CallSite(cast<InvokeInst>(inst));
-  }
-
-  Value **args = new Value *[cs.arg_size()];
+  const CallBase &cb = cast<CallBase>(*inst);
+  Value **args = new Value *[cb.arg_size()];
 
   std::vector<Type *> nullary;
 
@@ -314,36 +283,49 @@ Function *ExternalDispatcherImpl::createDispatcher(Function *target,
       ConstantInt::get(Type::getInt64Ty(ctx), (uintptr_t)(void *)&gTheArgsP),
       PointerType::getUnqual(PointerType::getUnqual(Type::getInt64Ty(ctx))),
       "argsp");
-  auto argI64s = Builder.CreateLoad(argI64sp, "args");
+  auto argI64s = Builder.CreateLoad(
+      argI64sp->getType()->getPointerElementType(), argI64sp, "args");
 
   // Get the target function type.
-  FunctionType *FTy = cast<FunctionType>(
-      cast<PointerType>(target->getType())->getElementType());
+  FunctionType *FTy = target->getFunctionType();
 
   // Each argument will be passed by writing it into gTheArgsP[i].
   unsigned i = 0, idx = 2;
-  for (CallSite::arg_iterator ai = cs.arg_begin(), ae = cs.arg_end(); ai != ae;
-       ++ai, ++i) {
+  for (auto ai = cb.arg_begin(), ae = cb.arg_end(); ai != ae; ++ai, ++i) {
     // Determine the type the argument will be passed as. This accommodates for
     // the corresponding code in Executor.cpp for handling calls to bitcasted
     // functions.
     auto argTy =
         (i < FTy->getNumParams() ? FTy->getParamType(i) : (*ai)->getType());
+
+    // fp80 must be aligned to 16 according to the System V AMD 64 ABI
+    if (argTy->isX86_FP80Ty() && idx & 0x01)
+      idx++;
+
     auto argI64p =
-        Builder.CreateGEP(KLEE_LLVM_GEP_TYPE(nullptr) argI64s,
+        Builder.CreateGEP(argI64s->getType()->getPointerElementType(), argI64s,
                           ConstantInt::get(Type::getInt32Ty(ctx), idx));
 
     auto argp = Builder.CreateBitCast(argI64p, PointerType::getUnqual(argTy));
-    args[i] = Builder.CreateLoad(argp);
+    args[i] =
+        Builder.CreateLoad(argp->getType()->getPointerElementType(), argp);
 
     unsigned argSize = argTy->getPrimitiveSizeInBits();
     idx += ((!!argSize ? argSize : 64) + 63) / 64;
   }
 
-  auto dispatchTarget = module->getOrInsertFunction(target->getName(), FTy,
-                                                    target->getAttributes());
-  auto result = Builder.CreateCall(dispatchTarget,
-                                   llvm::ArrayRef<Value *>(args, args + i));
+  llvm::CallInst *result;
+  if (auto* func = dyn_cast<KFunction>(target)) {
+    auto dispatchTarget = module->getOrInsertFunction(target->getName(), FTy,
+                                                      func->function->getAttributes());
+    result = Builder.CreateCall(dispatchTarget,
+                                llvm::ArrayRef<Value *>(args, args + i));
+  } else if (auto* asmValue = dyn_cast<KInlineAsm>(target)) {
+    result = Builder.CreateCall(asmValue->getInlineAsm(),
+                                llvm::ArrayRef<Value *>(args, args + i));
+  } else {
+    assert(0 && "Unhandled KCallable derived class");
+  }
   if (result->getType() != Type::getVoidTy(ctx)) {
     auto resp = Builder.CreateBitCast(
         argI64s, PointerType::getUnqual(result->getType()));
@@ -367,9 +349,9 @@ ExternalDispatcher::ExternalDispatcher(llvm::LLVMContext &ctx)
 
 ExternalDispatcher::~ExternalDispatcher() { delete impl; }
 
-bool ExternalDispatcher::executeCall(llvm::Function *function,
+bool ExternalDispatcher::executeCall(KCallable *callable,
                                      llvm::Instruction *i, uint64_t *args) {
-  return impl->executeCall(function, i, args);
+  return impl->executeCall(callable, i, args);
 }
 
 void *ExternalDispatcher::resolveSymbol(const std::string &name) {

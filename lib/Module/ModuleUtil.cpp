@@ -7,15 +7,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "klee/Internal/Support/ModuleUtil.h"
+#include "klee/Support/ModuleUtil.h"
 
 #include "klee/Config/Version.h"
-#include "klee/Internal/Support/Debug.h"
-#include "klee/Internal/Support/ErrorHandling.h"
+#include "klee/Support/Debug.h"
+#include "klee/Support/ErrorHandling.h"
 
-#if LLVM_VERSION_CODE >= LLVM_VERSION(5, 0)
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/BinaryFormat/Magic.h"
-#endif
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/IR/AssemblyAnnotationWriter.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -23,42 +26,16 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ValueSymbolTable.h"
 #include "llvm/IRReader/IRReader.h"
+#include "llvm/Linker/Linker.h"
 #include "llvm/Object/Archive.h"
 #include "llvm/Object/Error.h"
 #include "llvm/Object/ObjectFile.h"
-#if LLVM_VERSION_CODE < LLVM_VERSION(4, 0)
-#include "llvm/Support/DataStream.h"
-#endif
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/SourceMgr.h"
 
-#if LLVM_VERSION_CODE < LLVM_VERSION(3, 5)
-#include "llvm/Analysis/Verifier.h"
-#include "llvm/Assembly/AssemblyAnnotationWriter.h"
-#include "llvm/Linker.h"
-#else
-#include "llvm/IR/AssemblyAnnotationWriter.h"
-#include "llvm/IR/Verifier.h"
-#include "llvm/Linker/Linker.h"
-#endif
-
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
-#include "llvm/IR/DiagnosticInfo.h"
-#include "llvm/IR/DiagnosticPrinter.h"
-#endif
-
-#if LLVM_VERSION_CODE >= LLVM_VERSION(4, 0)
-#include <llvm/Bitcode/BitcodeReader.h>
-#else
-#include <llvm/Bitcode/ReaderWriter.h>
-#endif
-
-#include "llvm/Analysis/ValueTracking.h"
-#include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/Path.h"
-
-#include "klee/Internal/Module/LLVMPassManager.h"
 
 #include <algorithm>
 #include <fstream>
@@ -96,16 +73,11 @@ GetAllUndefinedSymbols(Module *M, std::set<std::string> &UndefinedSymbols) {
   for (auto const &Function : *M) {
     if (Function.hasName()) {
       if (Function.isDeclaration())
-        UndefinedSymbols.insert(Function.getName());
+        UndefinedSymbols.insert(Function.getName().str());
       else if (!Function.hasLocalLinkage()) {
-#if LLVM_VERSION_CODE < LLVM_VERSION(3, 5)
-        assert(!Function.hasDLLImportLinkage() &&
-               "Found dllimported non-external symbol!");
-#else
         assert(!Function.hasDLLImportStorageClass() &&
                "Found dllimported non-external symbol!");
-#endif
-        DefinedSymbols.insert(Function.getName());
+        DefinedSymbols.insert(Function.getName().str());
       }
     }
   }
@@ -114,22 +86,17 @@ GetAllUndefinedSymbols(Module *M, std::set<std::string> &UndefinedSymbols) {
        I != E; ++I)
     if (I->hasName()) {
       if (I->isDeclaration())
-        UndefinedSymbols.insert(I->getName());
+        UndefinedSymbols.insert(I->getName().str());
       else if (!I->hasLocalLinkage()) {
-#if LLVM_VERSION_CODE < LLVM_VERSION(3, 5)
-            assert(!I->hasDLLImportLinkage() && "Found dllimported non-external symbol!");
-#else
-            assert(!I->hasDLLImportStorageClass() && "Found dllimported non-external symbol!");
-#endif
-        DefinedSymbols.insert(I->getName());
+        assert(!I->hasDLLImportStorageClass() && "Found dllimported non-external symbol!");
+        DefinedSymbols.insert(I->getName().str());
       }
     }
 
   for (Module::const_alias_iterator I = M->alias_begin(), E = M->alias_end();
        I != E; ++I)
     if (I->hasName())
-      DefinedSymbols.insert(I->getName());
-
+      DefinedSymbols.insert(I->getName().str());
 
   // Prune out any defined symbols from the undefined symbols set
   // and other symbols we don't want to treat as an undefined symbol
@@ -168,20 +135,9 @@ GetAllUndefinedSymbols(Module *M, std::set<std::string> &UndefinedSymbols) {
 static bool linkTwoModules(llvm::Module *Dest,
                            std::unique_ptr<llvm::Module> Src,
                            std::string &errorMsg) {
-
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 8)
   // Get the potential error message (Src is moved and won't be available later)
   errorMsg = "Linking module " + Src->getModuleIdentifier() + " failed";
   auto linkResult = Linker::linkModules(*Dest, std::move(Src));
-#elif LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
-  raw_string_ostream Stream(errorMsg);
-  DiagnosticPrinterRawOStream DP(Stream);
-  auto linkResult = Linker::LinkModules(
-      Dest, Src.release(), [&](const DiagnosticInfo &DI) { DI.print(DP); });
-#else
-  auto linkResult = Linker::LinkModules(Dest, Src.release(),
-                                        Linker::DestroySource, &errorMsg);
-#endif
 
   return !linkResult;
 }
@@ -237,41 +193,69 @@ klee::linkModules(std::vector<std::unique_ptr<llvm::Module>> &modules,
     return nullptr;
   }
 
-  while (true) {
+  auto containsUsedSymbols = [](const llvm::Module *module) {
+    GlobalValue *GV =
+        dyn_cast_or_null<GlobalValue>(module->getNamedValue("llvm.used"));
+    if (!GV)
+      return false;
+    KLEE_DEBUG_WITH_TYPE("klee_linker", dbgs() << "Used attribute in "
+                                               << module->getModuleIdentifier()
+                                               << '\n');
+    return true;
+  };
+
+  for (auto &module : modules) {
+    if (!module || !containsUsedSymbols(module.get()))
+      continue;
+    if (!linkTwoModules(composite.get(), std::move(module), errorMsg)) {
+      // Linking failed
+      errorMsg = "Linking module containing '__attribute__((used))'"
+                 " symbols with composite failed:" +
+                 errorMsg;
+      return nullptr;
+    }
+    module = nullptr;
+  }
+
+  bool symbolsLinked = true;
+  while (symbolsLinked) {
+    symbolsLinked = false;
     std::set<std::string> undefinedSymbols;
     GetAllUndefinedSymbols(composite.get(), undefinedSymbols);
+    auto hasRequiredDefinition = [&undefinedSymbols](
+                                     const llvm::Module *module) {
+      for (auto symbol : undefinedSymbols) {
+        GlobalValue *GV =
+            dyn_cast_or_null<GlobalValue>(module->getNamedValue(symbol));
+        if (GV && !GV->isDeclaration()) {
+          KLEE_DEBUG_WITH_TYPE("klee_linker",
+                               dbgs() << "Found " << GV->getName() << " in "
+                                      << module->getModuleIdentifier() << "\n");
+          return true;
+        }
+      }
+      return false;
+    };
 
     // Stop in nothing is undefined
     if (undefinedSymbols.empty())
       break;
 
-    bool merged = false;
     for (auto &module : modules) {
       if (!module)
         continue;
 
-      for (auto symbol : undefinedSymbols) {
-        GlobalValue *GV =
-            dyn_cast_or_null<GlobalValue>(module->getNamedValue(symbol));
-        if (!GV || GV->isDeclaration())
-          continue;
+      if (!hasRequiredDefinition(module.get()))
+        continue;
 
-        // Found symbol, therefore merge in module
-        KLEE_DEBUG_WITH_TYPE("klee_linker",
-                             dbgs() << "Found " << GV->getName() << " in "
-                                    << module->getModuleIdentifier() << "\n");
-        if (linkTwoModules(composite.get(), std::move(module), errorMsg)) {
-          module = nullptr;
-          merged = true;
-          break;
-        }
+      if (!linkTwoModules(composite.get(), std::move(module), errorMsg)) {
         // Linking failed
         errorMsg = "Linking archive module with composite failed:" + errorMsg;
         return nullptr;
       }
+      module = nullptr;
+      symbolsLinked = true;
     }
-    if (!merged)
-      break;
   }
 
   // Condense the module array
@@ -285,55 +269,54 @@ klee::linkModules(std::vector<std::unique_ptr<llvm::Module>> &modules,
   return composite;
 }
 
-Function *klee::getDirectCallTarget(CallSite cs, bool moduleIsFullyLinked) {
-  Value *v = cs.getCalledValue();
+Function *klee::getDirectCallTarget(
+    const CallBase &cb,
+    bool moduleIsFullyLinked) {
+  Value *v = cb.getCalledOperand();
   bool viaConstantExpr = false;
   // Walk through aliases and bitcasts to try to find
   // the function being called.
   do {
-    if (Function *f = dyn_cast<Function>(v)) {
+    if (isa<llvm::GlobalVariable>(v)) {
+      // We don't care how we got this GlobalVariable
+      viaConstantExpr = false;
+
+      // Global variables won't be a direct call target. Instead, their
+      // value need to be read and is handled as indirect call target.
+      v = nullptr;
+    } else if (Function *f = dyn_cast<Function>(v)) {
       return f;
     } else if (llvm::GlobalAlias *ga = dyn_cast<GlobalAlias>(v)) {
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 9)
       if (moduleIsFullyLinked || !(ga->isInterposable())) {
-#else
-      if (moduleIsFullyLinked || !(ga->mayBeOverridden())) {
-#endif
         v = ga->getAliasee();
       } else {
-        v = NULL;
+        v = nullptr;
       }
     } else if (llvm::ConstantExpr *ce = dyn_cast<llvm::ConstantExpr>(v)) {
       viaConstantExpr = true;
       v = ce->getOperand(0)->stripPointerCasts();
     } else {
-      v = NULL;
+      v = nullptr;
     }
-  } while (v != NULL);
+  } while (v != nullptr);
 
   // NOTE: This assert may fire, it isn't necessarily a problem and
   // can be disabled, I just wanted to know when and if it happened.
   (void) viaConstantExpr;
   assert((!viaConstantExpr) &&
          "FIXME: Unresolved direct target for a constant expression");
-  return NULL;
+  return nullptr;
 }
 
 static bool valueIsOnlyCalled(const Value *v) {
-#if LLVM_VERSION_CODE < LLVM_VERSION(3, 5)
-  for (auto it = v->use_begin(), ie = v->use_end(); it != ie; ++it) {
-    auto user = *it;
-#else
   for (auto user : v->users()) {
-#endif
-    if (const auto *instr = dyn_cast<Instruction>(user)) {
-      // Make sure the instruction is a call or invoke.
-      CallSite cs(const_cast<Instruction *>(instr));
-      if (!cs) return false;
+    // Make sure the instruction is a call or invoke.
+    if (const auto *cb_ptr = dyn_cast<CallBase>(user)) {
+      const CallBase &cb = *cb_ptr;
 
       // Make sure that the value is only the target of this call and
       // not an argument.
-      if (cs.hasArgument(v))
+      if (cb.hasArgument(v))
         return false;
     } else if (const auto *ce = dyn_cast<ConstantExpr>(user)) {
       if (ce->getOpcode() == Instruction::BitCast)
@@ -364,46 +347,20 @@ bool klee::loadFile(const std::string &fileName, LLVMContext &context,
   KLEE_DEBUG_WITH_TYPE("klee_loader", dbgs()
                                           << "Load file " << fileName << "\n");
 
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 5)
   ErrorOr<std::unique_ptr<MemoryBuffer>> bufferErr =
       MemoryBuffer::getFileOrSTDIN(fileName);
   std::error_code ec = bufferErr.getError();
-#else
-  OwningPtr<MemoryBuffer> Buffer;
-  error_code ec = MemoryBuffer::getFileOrSTDIN(fileName, Buffer);
-#endif
   if (ec) {
     klee_error("Loading file %s failed: %s", fileName.c_str(),
                ec.message().c_str());
   }
 
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
   MemoryBufferRef Buffer = bufferErr.get()->getMemBufferRef();
-#elif LLVM_VERSION_CODE >= LLVM_VERSION(3, 5)
-  MemoryBuffer *Buffer = bufferErr->get();
-#endif
-
-#if LLVM_VERSION_CODE >= LLVM_VERSION(5, 0)
   file_magic magic = identify_magic(Buffer.getBuffer());
-#elif LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
-  sys::fs::file_magic magic = sys::fs::identify_magic(Buffer.getBuffer());
-#else
-  sys::fs::file_magic magic = sys::fs::identify_magic(Buffer->getBuffer());
-#endif
 
-#if LLVM_VERSION_CODE >= LLVM_VERSION(5, 0)
   if (magic == file_magic::bitcode) {
-#else
-  if (magic == sys::fs::file_magic::bitcode) {
-#endif
     SMDiagnostic Err;
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
     std::unique_ptr<llvm::Module> module(parseIR(Buffer, Err, context));
-#elif LLVM_VERSION_CODE >= LLVM_VERSION(3, 5)
-    std::unique_ptr<llvm::Module> module(ParseIR(Buffer, Err, context));
-#else
-    std::unique_ptr<llvm::Module> module(ParseIR(Buffer.take(), Err, context));
-#endif
     if (!module) {
       klee_error("Loading file %s failed: %s", fileName.c_str(),
                  Err.getMessage().str().c_str());
@@ -412,81 +369,36 @@ bool klee::loadFile(const std::string &fileName, LLVMContext &context,
     return true;
   }
 
-#if LLVM_VERSION_CODE >= LLVM_VERSION(5, 0)
   if (magic == file_magic::archive) {
-#else
-  if (magic == sys::fs::file_magic::archive) {
-#endif
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 9)
     Expected<std::unique_ptr<object::Binary> > archOwner =
       object::createBinary(Buffer, &context);
     if (!archOwner)
       ec = errorToErrorCode(archOwner.takeError());
     llvm::object::Binary *arch = archOwner.get().get();
-#elif LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
-    ErrorOr<std::unique_ptr<object::Binary>> archOwner =
-        object::createBinary(Buffer, &context);
-    ec = archOwner.getError();
-    llvm::object::Binary *arch = archOwner.get().get();
-#elif LLVM_VERSION_CODE >= LLVM_VERSION(3, 5)
-    ErrorOr<object::Binary *> archOwner =
-        object::createBinary(std::move(bufferErr.get()), &context);
-    ec = archOwner.getError();
-    llvm::object::Binary *arch = archOwner.get();
-#else
-    OwningPtr<object::Binary> archOwner;
-    ec = object::createBinary(Buffer.take(), archOwner);
-    llvm::object::Binary *arch = archOwner.get();
-#endif
     if (ec)
       klee_error("Loading file %s failed: %s", fileName.c_str(),
                  ec.message().c_str());
 
     if (auto archive = dyn_cast<object::Archive>(arch)) {
 // Load all bitcode files into memory
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 9)
       auto Err = Error::success();
-      for (object::Archive::child_iterator AI = archive->child_begin(Err),
-                                           AE = archive->child_end();
+      for (auto AI = archive->child_begin(Err), AE = archive->child_end();
            AI != AE; ++AI)
-#elif LLVM_VERSION_CODE >= LLVM_VERSION(3, 5)
-      for (object::Archive::child_iterator AI = archive->child_begin(),
-                                           AE = archive->child_end();
-           AI != AE; ++AI)
-#else
-      for (object::Archive::child_iterator AI = archive->begin_children(),
-                                           AE = archive->end_children();
-           AI != AE; ++AI)
-#endif
       {
 
         StringRef memberName;
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 5)
         std::error_code ec;
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 8)
         ErrorOr<object::Archive::Child> childOrErr = *AI;
         ec = childOrErr.getError();
         if (ec) {
                 errorMsg = ec.message();
                 return false;
         }
-#else
-	object::Archive::child_iterator childOrErr = AI;
-#endif
         auto memberNameErr = childOrErr->getName();
-#if LLVM_VERSION_CODE >= LLVM_VERSION(4, 0)
         ec = memberNameErr ? std::error_code() :
                 errorToErrorCode(memberNameErr.takeError());
-#else
-        ec = memberNameErr.getError();
-#endif
         if (!ec) {
           memberName = memberNameErr.get();
-#else
-        error_code ec = AI->getName(memberName);
-
-        if (ec == errc::success) {
-#endif
           KLEE_DEBUG_WITH_TYPE("klee_linker", dbgs()
                                                   << "Loading archive member "
                                                   << memberName << "\n");
@@ -495,39 +407,14 @@ bool klee::loadFile(const std::string &fileName, LLVMContext &context,
           return false;
         }
 
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 9)
         Expected<std::unique_ptr<llvm::object::Binary> > child =
             childOrErr->getAsBinary();
         if (!child)
           ec = errorToErrorCode(child.takeError());
-#elif LLVM_VERSION_CODE >= LLVM_VERSION(3, 5)
-        ErrorOr<std::unique_ptr<llvm::object::Binary>> child =
-            childOrErr->getAsBinary();
-        ec = child.getError();
-#else
-        OwningPtr<object::Binary> child;
-        ec = AI->getAsBinary(child);
-#endif
         if (ec) {
 // If we can't open as a binary object file its hopefully a bitcode file
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
           auto buff = childOrErr->getMemoryBufferRef();
-#if LLVM_VERSION_CODE >= LLVM_VERSION(4, 0)
           ec = buff ? std::error_code() : errorToErrorCode(buff.takeError());
-#else
-          ec = buff.getError();
-#endif
-#elif LLVM_VERSION_CODE >= LLVM_VERSION(3, 5)
-          ErrorOr<std::unique_ptr<MemoryBuffer>> buffErr =
-              AI->getMemoryBuffer();
-          std::unique_ptr<MemoryBuffer> buff = nullptr;
-          ec = buffErr.getError();
-          if (!ec)
-            buff = std::move(buffErr.get());
-#else
-        OwningPtr<MemoryBuffer> buff;
-        ec = AI->getMemoryBuffer(buff);
-#endif
           if (ec) {
             errorMsg = "Failed to get MemoryBuffer: " + ec.message();
             return false;
@@ -538,16 +425,8 @@ bool klee::loadFile(const std::string &fileName, LLVMContext &context,
             // materialise
             // the module
             SMDiagnostic Err;
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
             std::unique_ptr<llvm::Module> module =
                 parseIR(buff.get(), Err, context);
-#elif LLVM_VERSION_CODE >= LLVM_VERSION(3, 5)
-            std::unique_ptr<llvm::Module> module(
-                ParseIR(buff.get(), Err, context));
-#else
-          std::unique_ptr<llvm::Module> module(
-              ParseIR(buff.take(), Err, context));
-#endif
             if (!module) {
               klee_error("Loading file %s failed: %s", fileName.c_str(),
                          Err.getMessage().str().c_str());
@@ -568,12 +447,10 @@ bool klee::loadFile(const std::string &fileName, LLVMContext &context,
           return false;
         }
       }
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 9)
       if (Err) {
         errorMsg = "Cannot iterate over archive";
         return false;
       }
-#endif
     }
 
     return true;
@@ -585,23 +462,11 @@ bool klee::loadFile(const std::string &fileName, LLVMContext &context,
   }
   // This might still be an assembly file. Let's try to parse it.
   SMDiagnostic Err;
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 6)
   std::unique_ptr<llvm::Module> module(parseIR(Buffer, Err, context));
-#elif LLVM_VERSION_CODE >= LLVM_VERSION(3, 5)
-  std::unique_ptr<llvm::Module> module(ParseIR(Buffer, Err, context));
-#else
-std::unique_ptr<llvm::Module> module(ParseIR(Buffer.take(), Err, context));
-#endif
   if (!module) {
     klee_error("Loading file %s failed: Unrecognized file type.",
                fileName.c_str());
   }
   modules.push_back(std::move(module));
   return true;
-}
-
-void klee::checkModule(llvm::Module *m) {
-  LegacyLLVMPassManagerTy pm;
-  pm.add(createVerifierPass());
-  pm.run(*m);
 }

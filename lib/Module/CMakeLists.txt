@@ -6,8 +6,9 @@
 # License. See LICENSE.TXT for details.
 #
 #===------------------------------------------------------------------------===#
-klee_add_component(kleeModule
+set(KLEE_MODULE_COMPONENT_SRCS
   Checks.cpp
+  FunctionAlias.cpp
   InstructionInfoTable.cpp
   InstructionOperandTypeCheckPass.cpp
   IntrinsicCleaner.cpp
@@ -16,13 +17,17 @@ klee_add_component(kleeModule
   LowerSwitch.cpp
   ModuleUtil.cpp
   Optimize.cpp
+  OptNone.cpp
   PhiCleaner.cpp
   RaiseAsm.cpp
   OpenMergePass.cpp
-  Scalarizer.cpp
 )
 
-set(LLVM_COMPONENTS
+add_library(kleeModule
+  ${KLEE_MODULE_COMPONENT_SRCS}
+)
+
+llvm_config(kleeModule "${USE_LLVM_SHARED}"
   bitreader
   bitwriter
   codegen
@@ -30,15 +35,22 @@ set(LLVM_COMPONENTS
   irreader
   linker
   support
-)
+  scalaropts
+  instcombine
+  transformutils
+  analysis
+  object
+  mc
+  binaryformat
+  )
 
-klee_get_llvm_libs(LLVM_LIBS ${LLVM_COMPONENTS})
-target_link_libraries(kleeModule PUBLIC ${LLVM_LIBS})
 
-target_include_directories(kleeModule PUBLIC
-    ${SVF_ROOT_DIR}/include
-)
+target_include_directories(kleeModule PUBLIC ${SVF_ROOT_DIR}/include)
+
 target_link_libraries(kleeModule PRIVATE
   kleeSupport
   kleeAnalysis
 )
+target_include_directories(kleeModule PRIVATE ${KLEE_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS})
+target_compile_options(kleeModule PRIVATE ${KLEE_COMPONENT_CXX_FLAGS})
+target_compile_definitions(kleeModule PRIVATE ${KLEE_COMPONENT_CXX_DEFINES})

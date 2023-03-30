@@ -11,10 +11,11 @@
 #define KLEE_STATSTRACKER_H
 
 #include "CallPathManager.h"
-#include "klee/Internal/System/Time.h"
+#include "klee/System/Time.h"
 
 #include <memory>
 #include <set>
+#include <sqlite3.h>
 
 namespace llvm {
   class BranchInst;
@@ -38,7 +39,13 @@ namespace klee {
     Executor &executor;
     std::string objectFilename;
 
-    std::unique_ptr<llvm::raw_fd_ostream> statsFile, istatsFile;
+    std::unique_ptr<llvm::raw_fd_ostream> istatsFile;
+    ::sqlite3 *statsFile = nullptr;
+    ::sqlite3_stmt *transactionBeginStmt = nullptr;
+    ::sqlite3_stmt *transactionEndStmt = nullptr;
+    ::sqlite3_stmt *insertStmt = nullptr;
+    std::uint32_t statsCommitEvery;
+    std::uint32_t statsWriteCount = 0;
     time::Point startWallTime;
 
     unsigned numBranches;
@@ -61,7 +68,12 @@ namespace klee {
   public:
     StatsTracker(Executor &_executor, std::string _objectFilename,
                  bool _updateMinDistToUncovered);
-    ~StatsTracker() = default;
+    ~StatsTracker();
+
+    StatsTracker(const StatsTracker &other) = delete;
+    StatsTracker(StatsTracker &&other) noexcept = delete;
+    StatsTracker &operator=(const StatsTracker &other) = delete;
+    StatsTracker &operator=(StatsTracker &&other) noexcept = delete;
 
     // called after a new StackFrame has been pushed (for callpath tracing)
     void framePushed(ExecutionState &es, StackFrame *parentFrame);
@@ -93,4 +105,4 @@ namespace klee {
 
 }
 
-#endif
+#endif /* KLEE_STATSTRACKER_H */

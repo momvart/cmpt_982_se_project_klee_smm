@@ -1,4 +1,4 @@
-// RUN: %llvmgcc -emit-llvm -c -g %O0opt %s -o %t.bc
+// RUN: %clang -emit-llvm -c -g %O0opt %s -o %t.bc
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --output-dir=%t.klee-out -check-div-zero -emit-all-errors=0 %t.bc 2> %t.log
 // RUN: FileCheck --input-file=%t.log %s
@@ -25,7 +25,8 @@ int main() {
   // CHECK: consecutive_divide_by_zero.c:[[@LINE+1]]: divide by zero
   unsigned int result2 = b / d2;
 
-  // CHECK: completed paths = 3
+  // CHECK: completed paths = 1
+  // CHECK: partially completed paths = 2
   // CHECK: generated tests = 3
   return 0;
 }

@@ -15,41 +15,44 @@
 #endif
 #endif
 
-
-#include "klee/Config/Version.h"
+#define INSIDE_FD_64
 #define _LARGEFILE64_SOURCE
 #define _FILE_OFFSET_BITS 64
 #include "fd.h"
 
-#include <string.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include "klee/Config/Version.h"
+#include "klee/klee.h"
+
+#include <assert.h>
 #include <errno.h>
-#include <sys/syscall.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <fcntl.h>
 #include <stdarg.h>
-#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#ifndef __FreeBSD__
 #include <sys/vfs.h>
-#include <unistd.h>
+#endif
 #include <dirent.h>
 #include <sys/ioctl.h>
 #include <sys/mtio.h>
-#include <termios.h>
 #include <sys/select.h>
-#include <klee/klee.h>
+#include <termios.h>
+#include <unistd.h>
 
 /*** Forward to actual implementations ***/
 
 int open(const char *pathname, int flags, ...) {
   mode_t mode = 0;
-  
+
   if (flags & O_CREAT) {
     /* get mode */
     va_list ap;
     va_start(ap, flags);
-    mode = va_arg(ap, mode_t);
+    mode = va_arg(ap, int);
     va_end(ap);
   }
 
@@ -58,17 +61,27 @@ int open(const char *pathname, int flags, ...) {
 
 int openat(int fd, const char *pathname, int flags, ...) {
   mode_t mode = 0;
-  
+
   if (flags & O_CREAT) {
     /* get mode */
     va_list ap;
     va_start(ap, flags);
-    mode = va_arg(ap, mode_t);
+    mode = va_arg(ap, int);
     va_end(ap);
   }
 
   return __fd_openat(fd, pathname, flags, mode);
 }
+
+/* removed in glibc 2.33 */
+#ifdef __REDIRECT_NTH
+extern int __REDIRECT_NTH(__fxstat, (int __ver, int __fildes,
+                          struct stat *__stat_buf), __fxstat64);
+extern int __REDIRECT_NTH(__xstat, (int __ver, const char *__filename,
+                          struct stat *__stat_buf), __xstat64);
+extern int __REDIRECT_NTH(__lxstat, (int __ver, const char *__filename,
+                          struct stat *__stat_buf), __lxstat64);
+#endif
 
 off64_t lseek(int fd, off64_t offset, int whence) {
   return __fd_lseek(fd, offset, whence);
@@ -107,8 +120,8 @@ int statfs(const char *path, struct statfs *buf) {
   return __fd_statfs(path, buf);
 }
 
-int getdents64(unsigned int fd, struct dirent *dirp, unsigned int count) {
+ssize_t getdents64(int fd, void *dirp, size_t count) {
   return __fd_getdents(fd, (struct dirent64*) dirp, count);
 }
-int __getdents64(unsigned int fd, struct dirent *dirp, unsigned int count)
+ssize_t __getdents64(int fd, void *dirp, size_t count)
      __attribute__((alias("getdents64")));
